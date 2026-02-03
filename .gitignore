@@ -3,6 +3,8 @@ venv/
 .venv/
 env/
 
+Imaginative_Polytopes/
+
 # Python
 __pycache__/
 *.py[cod]

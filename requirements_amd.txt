@@ -1,0 +1,17 @@
+# PyTorch with ROCm support for AMD GPUs
+--index-url https://download.pytorch.org/whl/rocm6.1
+--extra-index-url https://pypi.org/simple
+torch
+torchvision
+torchaudio
+
+# Additional dependencies for DC decomposition
+numpy>=1.21.0
+scipy>=1.7.0
+matplotlib>=3.5.0
+jupyter>=1.0.0
+notebook>=6.4.0
+ipywidgets>=7.6.0
+
+# Optional but recommended for performance
+numba>=0.56.0

@@ -11,7 +11,6 @@ the operations are linear (reshape, permute, transpose, scalar mul/div).
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch import Tensor
 from typing import Tuple, Optional, List, Union
 
@@ -203,6 +202,7 @@ class DCAdd(nn.Module):
             self._dc_operand_pos = b_pos
             self._dc_operand_neg = b_neg
         else:
+            import torch.nn.functional as F
             self._dc_operand_pos = F.relu(b)
             self._dc_operand_neg = F.relu(-b)
 
@@ -350,102 +350,56 @@ class DCIdentity(nn.Module):
 
 
 class DCEmbedding(nn.Module):
-    """
-    Embedding lookup for DC decomposition.
-
-    The embedding weights are decomposed: W = W_pos - W_neg
-    Output: pos = W_pos[indices], neg = W_neg[indices]
-
-    Args:
-        num_embeddings: Size of the dictionary
-        embedding_dim: Dimension of embeddings
-        padding_idx: If given, pads output with zeros at this index
-    """
-    _dc_is_embedding = True
-
-    def __init__(self, num_embeddings: int, embedding_dim: int, padding_idx: Optional[int] = None):
+    """DC Embedding operation wrapper."""
+    def __init__(self, num_embeddings: int, embedding_dim: int, **kwargs):
         super().__init__()
-        self.embedding = nn.Embedding(num_embeddings, embedding_dim, padding_idx=padding_idx)
-        self.num_embeddings = num_embeddings
-        self.embedding_dim = embedding_dim
-        self.padding_idx = padding_idx
+        self.embedding = nn.Embedding(num_embeddings, embedding_dim, **kwargs)
+        self._dc_is_embedding = True
 
-    def forward(self, x: Tensor) -> Tensor:
-        return self.embedding(x)
-
-    def extra_repr(self) -> str:
-        return f'{self.num_embeddings}, {self.embedding_dim}'
+    def forward(self, input_pos: Tensor, input_neg: Tensor) -> Tuple[Tensor, Tensor]:
+        # For embedding, typically indices are the same for pos/neg
+        # Apply embedding to both streams
+        output_pos = self.embedding(input_pos)
+        output_neg = self.embedding(input_neg)
+        return output_pos, output_neg
 
 
 class DCGather(nn.Module):
-    """
-    Gather operation for DC decomposition.
-
-    Gather is a linear operation - pos and neg are gathered identically.
-
-    Args:
-        dim: Dimension to gather along
-    """
-    _dc_is_gather = True
-
+    """DC Gather operation."""
     def __init__(self, dim: int):
         super().__init__()
         self.dim = dim
+        self._dc_is_gather = True
 
-    def forward(self, x: Tensor, index: Tensor) -> Tensor:
-        return torch.gather(x, self.dim, index)
-
-    def extra_repr(self) -> str:
-        return f'dim={self.dim}'
+    def forward(self, input_pos: Tensor, input_neg: Tensor, index: Tensor) -> Tuple[Tensor, Tensor]:
+        output_pos = torch.gather(input_pos, self.dim, index)
+        output_neg = torch.gather(input_neg, self.dim, index)
+        return output_pos, output_neg
 
 
 class DCMean(nn.Module):
-    """
-    Mean reduction for DC decomposition.
-
-    Mean is a linear operation: mean(pos - neg) = mean(pos) - mean(neg)
-
-    Args:
-        dim: Dimension(s) to reduce
-        keepdim: Whether to keep reduced dimensions
-    """
-    _dc_is_mean = True
-
-    def __init__(self, dim: Optional[Union[int, Tuple[int, ...]]] = None, keepdim: bool = False):
+    """DC Mean reduction operation."""
+    def __init__(self, dim=None, keepdim: bool = False):
         super().__init__()
         self.dim = dim
         self.keepdim = keepdim
+        self._dc_is_mean = True
 
-    def forward(self, x: Tensor) -> Tensor:
-        if self.dim is None:
-            return x.mean()
-        return x.mean(dim=self.dim, keepdim=self.keepdim)
-
-    def extra_repr(self) -> str:
-        return f'dim={self.dim}, keepdim={self.keepdim}'
+    def forward(self, input_pos: Tensor, input_neg: Tensor) -> Tuple[Tensor, Tensor]:
+        output_pos = torch.mean(input_pos, dim=self.dim, keepdim=self.keepdim)
+        output_neg = torch.mean(input_neg, dim=self.dim, keepdim=self.keepdim)
+        return output_pos, output_neg
 
 
 class DCSum(nn.Module):
-    """
-    Sum reduction for DC decomposition.
-
-    Sum is a linear operation: sum(pos - neg) = sum(pos) - sum(neg)
-
-    Args:
-        dim: Dimension(s) to reduce
-        keepdim: Whether to keep reduced dimensions
-    """
-    _dc_is_sum = True
-
-    def __init__(self, dim: Optional[Union[int, Tuple[int, ...]]] = None, keepdim: bool = False):
+    """DC Sum reduction operation."""
+    def __init__(self, dim=None, keepdim: bool = False):
         super().__init__()
         self.dim = dim
         self.keepdim = keepdim
+        self._dc_is_sum = True
 
-    def forward(self, x: Tensor) -> Tensor:
-        if self.dim is None:
-            return x.sum()
-        return x.sum(dim=self.dim, keepdim=self.keepdim)
-
-    def extra_repr(self) -> str:
-        return f'dim={self.dim}, keepdim={self.keepdim}'
+    def forward(self, input_pos: Tensor, input_neg: Tensor) -> Tuple[Tensor, Tensor]:
+        output_pos = torch.sum(input_pos, dim=self.dim, keepdim=self.keepdim)
+        output_neg = torch.sum(input_neg, dim=self.dim, keepdim=self.keepdim)
+        return output_pos, output_neg

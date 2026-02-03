@@ -11,7 +11,7 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
-from .hook_decomposer import HookDecomposer, ReLUMode, ShiftMode
+from .hook_decomposer import HookDecomposer, ReLUMode, InputMode, BackwardMode
 from .dc_matmul import DCMatMul, DCMatMulFunction
 
 
@@ -342,10 +342,10 @@ def example_shift_modes():
     x = torch.randn(1, 10)
     print(f"Input x[0,:5]: {x[0, :5].tolist()}")
 
-    # Test each shift mode
-    for mode in [ShiftMode.CENTER, ShiftMode.POSITIVE, ShiftMode.NEGATIVE, ShiftMode.BETA]:
-        beta = 0.7 if mode == ShiftMode.BETA else 0.5
-        decomposer = HookDecomposer(model, shift_mode=mode, beta=beta)
+    # Test each input mode
+    for mode in [InputMode.CENTER, InputMode.POSITIVE, InputMode.NEGATIVE, InputMode.BETA]:
+        beta = 0.7 if mode == InputMode.BETA else 0.5
+        decomposer = HookDecomposer(model, input_mode=mode, beta=beta)
         decomposer.initialize()
         output = model(x)
 
@@ -353,13 +353,13 @@ def example_shift_modes():
         first_layer = decomposer.layer_order[0]
         cache = decomposer.caches[first_layer]
 
-        print(f"\n{mode.value.upper()} mode{' (beta=0.7)' if mode == ShiftMode.BETA else ''}:")
+        print(f"\n{mode.value.upper()} mode{' (beta=0.7)' if mode == InputMode.BETA else ''}:")
         print(f"  input_pos[0,:5]: {cache.input_pos[0, :5].tolist()}")
         print(f"  input_neg[0,:5]: {cache.input_neg[0, :5].tolist()}")
         print(f"  pos - neg = x:   {(cache.input_pos - cache.input_neg)[0, :5].tolist()}")
 
         # Verify non-negativity for CENTER mode
-        if mode == ShiftMode.CENTER:
+        if mode == InputMode.CENTER:
             pos_nonneg = (cache.input_pos >= 0).all().item()
             neg_nonneg = (cache.input_neg >= 0).all().item()
             print(f"  pos non-negative: {pos_nonneg}, neg non-negative: {neg_nonneg}")
@@ -410,7 +410,7 @@ def example_runtime_configuration():
     model.eval()
 
     # Start with CENTER shift mode (default)
-    decomposer = HookDecomposer(model, shift_mode=ShiftMode.CENTER)
+    decomposer = HookDecomposer(model, input_mode=InputMode.CENTER)
 
     x = torch.randn(1, 10)
 
@@ -422,7 +422,7 @@ def example_runtime_configuration():
     print(f"With CENTER mode: input_pos non-negative = {pos_nonneg}")
 
     # Change shift mode at runtime to BETA
-    decomposer.set_shift_mode(ShiftMode.BETA)
+    decomposer.set_input_mode(InputMode.BETA)
     decomposer.set_beta(0.5)
     decomposer.initialize()
     model(x)

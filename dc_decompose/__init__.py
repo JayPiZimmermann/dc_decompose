@@ -105,7 +105,7 @@ For matrix multiplications (e.g., attention in transformers):
     output_pos, output_neg = DCMatMulFunction.forward(A_pos, A_neg, B_pos, B_neg)
 """
 
-from .hook_decomposer import HookDecomposer, ShiftMode, ReLUMode, DCCache
+from .hook_decomposer import HookDecomposer, InputMode, BackwardMode, ReLUMode, DCCache
 from .dc_matmul import DCMatMul, DCMatMulFunction
 from .dc_operations import (
     DCReshape, DCDynamicReshape, DCPermute, DCTranspose, DCContiguous,
