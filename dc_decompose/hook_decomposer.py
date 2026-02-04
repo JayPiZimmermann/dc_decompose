@@ -70,12 +70,16 @@ class DCCache:
             setattr(self, attr, None)
 
 
+# Import ReLU helpers from operations module
+from .operations.relu import forward_relu, backward_relu
+
 # Attribute names stored on original modules
 DC_INPUT_MODE = '_dc_input_mode'
 DC_BETA = '_dc_beta'
 DC_BACKWARD_MODE = '_dc_backward_mode'
 DC_ALPHA = '_dc_alpha'
 DC_RELU_MODE = '_dc_relu_mode'
+DC_BACKPROP_MODE = '_dc_backprop_mode'
 DC_ENABLED = '_dc_enabled'
 DC_CACHE_ACTIVATIONS = '_dc_cache_activations'
 DC_WEIGHT_POS = '_dc_weight_pos'
@@ -124,6 +128,7 @@ class HookDecomposer:
         backward_mode: BackwardMode = BackwardMode.ALPHA,
         alpha: float = 0.35,
         relu_mode: ReLUMode = ReLUMode.MAX,
+        relu_backprop_mode: str = 'standard',
         cache_activations: bool = True,
         target_layers: Optional[List[str]] = None,
     ):
@@ -143,7 +148,8 @@ class HookDecomposer:
                 - ALPHA (default): Apply α-shifting to stabilize gradients
                 - NONE: No gradient shifting
             alpha: α parameter for gradient shifting (default 0.35, recommended range 0.2-0.5)
-            relu_mode: How to decompose ReLU activations
+            relu_mode: How to decompose ReLU activations (max/min/half)
+            relu_backprop_mode: ReLU backprop mode ('standard', 'mask_diff', 'sum')
             cache_activations: Whether to cache activations (required for backward)
             target_layers: Optional list of layer names to decompose (None = all)
         """
@@ -153,6 +159,7 @@ class HookDecomposer:
         self.backward_mode = backward_mode
         self.alpha = alpha
         self.relu_mode = relu_mode
+        self.relu_backprop_mode = relu_backprop_mode
         self.cache_activations = cache_activations
         self.target_layers = target_layers
 
@@ -161,8 +168,9 @@ class HookDecomposer:
         self.layer_order: List[str] = []
         self.modules: Dict[str, nn.Module] = {}
 
-        # Current decomposed state flowing through network (stacked format)
-        self._current_stacked: Optional[Tensor] = None  # Shape: [2, batch, ...]
+        # Stacked tensor cache: maps original tensor data_ptr to stacked version
+        # This handles branching where multiple modules receive the same input
+        self._stacked_cache: Dict[int, Tensor] = {}
         self._initialized: bool = False
 
         # Hook handles
@@ -239,6 +247,7 @@ class HookDecomposer:
         setattr(module, DC_BACKWARD_MODE, self.backward_mode)
         setattr(module, DC_ALPHA, self.alpha)
         setattr(module, DC_RELU_MODE, self.relu_mode)
+        setattr(module, DC_BACKPROP_MODE, self.relu_backprop_mode)
         setattr(module, DC_ENABLED, True)
         setattr(module, DC_CACHE_ACTIVATIONS, self.cache_activations)
 
@@ -267,10 +276,15 @@ class HookDecomposer:
             cache = self.caches[name]
             should_cache = getattr(module, DC_CACHE_ACTIVATIONS, True)
 
-            # Get stacked input from previous layer or initialize
-            if not self._initialized:
+            # Get stacked input from cache (handles branching) or initialize
+            x = inputs[0]
+            input_ptr = x.data_ptr()
+
+            if input_ptr in self._stacked_cache:
+                # Use cached stacked version for this input tensor (handles branching)
+                stacked_input = self._stacked_cache[input_ptr]
+            elif not self._initialized:
                 # First layer: apply input_mode-based initialization
-                x = inputs[0]
                 input_mode = getattr(module, DC_INPUT_MODE, InputMode.CENTER)
                 beta = getattr(module, DC_BETA, 1.0)
 
@@ -294,11 +308,13 @@ class HookDecomposer:
                     # Default to CENTER
                     input_pos = F.relu(x)
                     input_neg = F.relu(-x)
-                
+
                 # Stack into format [2, batch, ...]
                 stacked_input = torch.stack([input_pos, input_neg], dim=0)
+                self._stacked_cache[input_ptr] = stacked_input
                 self._initialized = True
             else:
+                # Use the most recent stacked output as fallback
                 stacked_input = self._current_stacked
                 
             # Cache inputs if requested (unstack only for caching)
@@ -316,9 +332,8 @@ class HookDecomposer:
                 stacked_output = self._forward_conv2d_stacked(module, stacked_input)
 
             elif isinstance(module, nn.ReLU):
-                relu_mode = getattr(module, DC_RELU_MODE, ReLUMode.MAX)
                 stacked_output = self._forward_relu_stacked(
-                    cache, stacked_input, relu_mode, should_cache
+                    module, cache, stacked_input, should_cache
                 )
 
             elif isinstance(module, (nn.BatchNorm1d, nn.BatchNorm2d)):
@@ -468,9 +483,14 @@ class HookDecomposer:
                 output_pos, output_neg = stacked_output[0], stacked_output[1]
                 cache.output_pos = output_pos.detach()
                 cache.output_neg = output_neg.detach()
-            
+
             # Update current stacked state for next layer
             self._current_stacked = stacked_output
+
+            # Cache stacked output by output tensor's data_ptr for branching support
+            # This allows subsequent layers that receive this output to use the stacked version
+            output_ptr = output.data_ptr()
+            self._stacked_cache[output_ptr] = stacked_output
 
         return hook
 
@@ -529,37 +549,17 @@ class HookDecomposer:
         return output_pos, output_neg
 
     def _forward_relu(
-        self, cache: DCCache, input_pos: Tensor, input_neg: Tensor,
-        relu_mode: ReLUMode, should_cache: bool
+        self, module: nn.ReLU, cache: DCCache, input_pos: Tensor, input_neg: Tensor, should_cache: bool
     ) -> Tuple[Tensor, Tensor]:
-        """DC forward for ReLU layer."""
-        # Pre-activation value
-        z_before = input_pos - input_neg
+        """DC forward for ReLU layer. Reads config from module."""
+        # Cache z_before for backward pass
         if should_cache:
-            cache.z_before = z_before.detach()
+            cache.z_before = (input_pos - input_neg).detach()
 
-        if relu_mode == ReLUMode.MAX:
-            # pos_out = ReLU(z_before), neg_out = 0
-            output_pos = F.relu(z_before)
-            output_neg = torch.zeros_like(output_pos)
-
-        elif relu_mode == ReLUMode.MIN:
-            # Minimize pos stream magnitude
-            min_val = torch.minimum(input_pos, input_neg)
-            output_pos = input_pos - min_val + F.relu(-z_before)
-            output_neg = input_neg - min_val + F.relu(-z_before)
-
-        elif relu_mode == ReLUMode.HALF:
-            # Average of MAX and MIN
-            max_val = torch.maximum(input_pos, input_neg)
-            min_val = torch.minimum(input_pos, input_neg)
-            output_pos = F.relu((max_val + input_pos - min_val) / 2)
-            output_neg = F.relu((input_neg + min_val - max_val) / 2)
-
-        else:
-            raise ValueError(f"Unknown ReLU mode: {relu_mode}")
-
-        return output_pos, output_neg
+        # Read split_mode from module
+        relu_mode = getattr(module, DC_RELU_MODE, ReLUMode.MAX)
+        split_mode = relu_mode.value if isinstance(relu_mode, ReLUMode) else relu_mode
+        return forward_relu(input_pos, input_neg, split_mode)
 
     def _forward_batchnorm(self, module: nn.BatchNorm2d, input_pos: Tensor, input_neg: Tensor) -> Tuple[Tensor, Tensor]:
         """DC forward for BatchNorm2d layer (variance treated as constant) using masked views."""
@@ -823,28 +823,20 @@ class HookDecomposer:
         return torch.stack([output_pos, output_neg], dim=0)
 
     def _forward_relu_stacked(
-        self, cache: DCCache, stacked_input: Tensor, 
-        relu_mode: ReLUMode, should_cache: bool
+        self, module: nn.ReLU, cache: DCCache, stacked_input: Tensor, should_cache: bool
     ) -> Tensor:
-        """DC forward for ReLU using stacked tensors."""
+        """DC forward for ReLU using stacked tensors. Reads config from module."""
         input_pos, input_neg = stacked_input[0], stacked_input[1]
-        
-        if relu_mode == ReLUMode.MAX:
-            # Max mode: pos_out = max(pos_in, neg_in), neg_out = neg_in
-            # This implements: max(a-b, 0) = max(a, b) - b where a = pos_in, b = neg_in
-            output_pos = torch.max(input_pos, input_neg)
-            output_neg = input_neg
-        elif relu_mode == ReLUMode.POS:
-            # Pos mode: pos_out = relu(pos_in), neg_out = relu(neg_in) 
-            output_pos = F.relu(input_pos)
-            output_neg = F.relu(input_neg)
-        else:
-            raise ValueError(f"Unknown ReLU mode: {relu_mode}")
-        
+
         # Cache z_before for backward pass if requested
         if should_cache:
             cache.z_before = input_pos - input_neg
-        
+
+        # Read split_mode from module
+        relu_mode = getattr(module, DC_RELU_MODE, ReLUMode.MAX)
+        split_mode = relu_mode.value if isinstance(relu_mode, ReLUMode) else relu_mode
+        output_pos, output_neg = forward_relu(input_pos, input_neg, split_mode)
+
         return torch.stack([output_pos, output_neg], dim=0)
 
     def _forward_batchnorm_stacked(self, module, stacked_input: Tensor) -> Tensor:
@@ -887,29 +879,33 @@ class HookDecomposer:
     ) -> Tensor:
         """DC forward for MaxPool2d using stacked tensors with winner-takes-all."""
         input_pos, input_neg = stacked_input[0], stacked_input[1]
-        
+
         # Get original activation for determining winners
         z_before = input_pos - input_neg
-        
+
         # Get argmax indices from original activation
         _, indices = F.max_pool2d(
             z_before, module.kernel_size, module.stride, module.padding,
             return_indices=True
         )
-        
+
+        # Cache indices for backward pass
+        if should_cache:
+            cache.pool_indices = indices.detach()
+
         # Apply same indices to both pos and neg streams
         batch, channels, h_in, w_in = input_pos.shape
         h_out, w_out = indices.shape[2], indices.shape[3]
-        
+
         # Flatten for gather operation
         pos_flat = input_pos.view(batch, channels, -1)
         neg_flat = input_neg.view(batch, channels, -1)
         indices_flat = indices.view(batch, channels, -1)
-        
+
         # Gather using indices
         output_pos = torch.gather(pos_flat, 2, indices_flat).view(batch, channels, h_out, w_out)
         output_neg = torch.gather(neg_flat, 2, indices_flat).view(batch, channels, h_out, w_out)
-        
+
         return torch.stack([output_pos, output_neg], dim=0)
 
     def _forward_avgpool_stacked(self, module: nn.AvgPool2d, stacked_input: Tensor) -> Tensor:
@@ -1018,6 +1014,7 @@ class HookDecomposer:
         """
         self._current_stacked = None
         self._initialized = False
+        self._stacked_cache.clear()
 
         for cache in self.caches.values():
             cache.clear()
@@ -1171,9 +1168,8 @@ class HookDecomposer:
                 stacked_gradients = self._backward_conv2d_stacked(module, stacked_gradients)
 
             elif isinstance(module, nn.ReLU):
-                relu_mode = getattr(module, DC_RELU_MODE, ReLUMode.MAX)
                 stacked_gradients = self._backward_relu_stacked(
-                    cache, stacked_gradients, relu_mode
+                    module, cache, stacked_gradients
                 )
 
             elif isinstance(module, (nn.BatchNorm1d, nn.BatchNorm2d)):
@@ -1408,34 +1404,29 @@ class HookDecomposer:
 
         return torch.stack([new_delta_pp, new_delta_np, new_delta_pn, new_delta_nn], dim=0)
 
-    def _backward_relu_stacked(self, cache: DCCache, stacked_gradients: Tensor, relu_mode: ReLUMode) -> Tensor:
-        """Backward through ReLU using stacked gradients."""
+    def _backward_relu_stacked(
+        self, module: nn.ReLU, cache: DCCache, stacked_gradients: Tensor
+    ) -> Tensor:
+        """Backward through ReLU using stacked gradients. Reads config from module."""
         delta_pp, delta_np, delta_pn, delta_nn = stacked_gradients[0], stacked_gradients[1], stacked_gradients[2], stacked_gradients[3]
-        
-        if relu_mode == ReLUMode.MAX:
-            # For MAX mode: pos_out = max(pos_in, neg_in), neg_out = neg_in
-            # Need masks from cached z_before = pos_in - neg_in
-            if hasattr(cache, 'z_before') and cache.z_before is not None:
-                mask_pos = (cache.z_before >= 0).float()  # pos >= neg
-                mask_neg = (cache.z_before < 0).float()   # pos < neg
-                
-                # Gradients flow based on which input was selected by max
-                new_delta_pp = delta_pp * mask_pos
-                new_delta_np = delta_np + delta_pp * mask_neg  # neg contributes to max when pos < neg
-                new_delta_pn = delta_pn * mask_pos  
-                new_delta_nn = delta_nn + delta_pn * mask_neg
-            else:
-                # Fallback: pass through unchanged
-                new_delta_pp, new_delta_np, new_delta_pn, new_delta_nn = delta_pp, delta_np, delta_pn, delta_nn
-        elif relu_mode == ReLUMode.POS:
-            # For POS mode: pos_out = relu(pos_in), neg_out = relu(neg_in)
-            # Standard ReLU backward for each stream separately 
-            # This would need input_pos and input_neg for masks - fallback for now
-            new_delta_pp, new_delta_np, new_delta_pn, new_delta_nn = delta_pp, delta_np, delta_pn, delta_nn
-        else:
-            raise ValueError(f"Unknown ReLU mode: {relu_mode}")
 
-        return torch.stack([new_delta_pp, new_delta_np, new_delta_pn, new_delta_nn], dim=0)
+        if not hasattr(cache, 'z_before') or cache.z_before is None:
+            # Fallback: pass through unchanged if no cached z_before
+            return stacked_gradients
+
+        # Compute masks from cached z_before
+        mp = (cache.z_before >= 0).float()  # pos >= neg
+        mn = (cache.z_before < 0).float()   # pos < neg
+
+        # Read config from module
+        relu_mode = getattr(module, DC_RELU_MODE, ReLUMode.MAX)
+        split_mode = relu_mode.value if isinstance(relu_mode, ReLUMode) else relu_mode
+        backprop_mode = getattr(module, DC_BACKPROP_MODE, 'standard')
+
+        new_pp, new_np, new_pn, new_nn = backward_relu(
+            delta_pp, delta_np, delta_pn, delta_nn, mp, mn, split_mode, backprop_mode)
+
+        return torch.stack([new_pp, new_np, new_pn, new_nn], dim=0)
 
     def _backward_batchnorm_stacked(self, module, stacked_gradients: Tensor) -> Tensor:
         """Backward through BatchNorm using stacked gradients."""
@@ -1444,41 +1435,84 @@ class HookDecomposer:
         return stacked_gradients
 
     def _backward_maxpool_stacked(self, cache: DCCache, stacked_gradients: Tensor) -> Tensor:
-        """Backward through MaxPool using stacked gradients."""
-        # MaxPool backward is complex - for now, approximate as identity
-        # Full implementation would need to unpool using cached indices
-        return stacked_gradients
+        """Backward through MaxPool using stacked gradients [4, batch, C, H_out, W_out]."""
+        if not hasattr(cache, 'input_pos') or cache.input_pos is None:
+            return stacked_gradients
+
+        input_shape = cache.input_pos.shape  # [batch, C, H_in, W_in]
+        batch, channels, h_in, w_in = input_shape
+
+        # Get pool indices from cache (if available)
+        if hasattr(cache, 'pool_indices') and cache.pool_indices is not None:
+            indices = cache.pool_indices  # [batch, C, H_out, W_out]
+            h_out, w_out = indices.shape[2], indices.shape[3]
+
+            # Process each of the 4 gradient components
+            result_components = []
+            for i in range(4):
+                grad_component = stacked_gradients[i]  # [batch, C, H_out, W_out]
+
+                # Create output tensor filled with zeros
+                output = torch.zeros(batch, channels, h_in * w_in,
+                                   device=grad_component.device, dtype=grad_component.dtype)
+
+                # Flatten for scatter operation
+                indices_flat = indices.view(batch, channels, -1)
+                grad_flat = grad_component.view(batch, channels, -1)
+
+                # Scatter gradients to winner positions
+                output.scatter_(2, indices_flat, grad_flat)
+
+                # Reshape to spatial dimensions
+                output = output.view(batch, channels, h_in, w_in)
+                result_components.append(output)
+
+            return torch.stack(result_components, dim=0)
+        else:
+            # Fallback: use nearest neighbor upsampling if no indices cached
+            h_out, w_out = stacked_gradients.shape[3], stacked_gradients.shape[4]
+            result_components = []
+            for i in range(4):
+                grad_component = stacked_gradients[i]
+                upsampled = F.interpolate(grad_component, size=(h_in, w_in), mode='nearest')
+                result_components.append(upsampled)
+            return torch.stack(result_components, dim=0)
 
     def _backward_avgpool_stacked(self, cache: DCCache, module: nn.Module, stacked_gradients: Tensor) -> Tensor:
-        """Backward through AvgPool using stacked gradients."""
-        # AvgPool is linear - can apply backward directly to stacked tensor
+        """Backward through AvgPool using stacked gradients [4, batch, C, H, W]."""
+        if not hasattr(cache, 'input_pos') or cache.input_pos is None:
+            return stacked_gradients
+
+        input_size = cache.input_pos.shape[2:]  # [H_in, W_in]
+
+        # Process each of the 4 gradient components separately
+        # stacked_gradients: [4, batch, channels, H_out, W_out]
+        result_components = []
+        for i in range(4):
+            grad_component = stacked_gradients[i]  # [batch, channels, H_out, W_out]
+            upsampled = F.interpolate(grad_component, size=input_size, mode='nearest')
+            result_components.append(upsampled)
+
+        # Stack back together: [4, batch, channels, H_in, W_in]
+        result = torch.stack(result_components, dim=0)
+
+        # For AvgPool, divide by kernel area
         if isinstance(module, nn.AvgPool2d):
-            # Upsample each gradient component
-            kernel_size = module.kernel_size
-            stride = module.stride or kernel_size
-            padding = module.padding
-            
-            # Apply same upsampling to all 4 gradient components
-            return F.interpolate(stacked_gradients, scale_factor=stride, mode='nearest')
-        else:
-            # AdaptiveAvgPool2d - use a simple approximation for backward
-            # Since AdaptiveAvgPool2d is linear, we can approximate the backward as upsampling
-            if hasattr(cache, 'input_pos') and cache.input_pos is not None:
-                input_size = cache.input_pos.shape[2:]  # [H_in, W_in]
-                
-                # Simple approach: use F.interpolate on each gradient component separately
-                result_components = []
-                for i in range(4):  # Process each of the 4 gradient components
-                    grad_component = stacked_gradients[i]  # [batch, channels, H_out, W_out]
-                    # Upsample to input size
-                    upsampled = F.interpolate(grad_component, size=input_size, mode='nearest')
-                    result_components.append(upsampled)
-                
-                # Stack back together
-                return torch.stack(result_components, dim=0)
-            else:
-                # If no input cached, return gradients as-is (will likely cause dimension error)
-                return stacked_gradients
+            ks = module.kernel_size
+            kh = ks if isinstance(ks, int) else ks[0]
+            kw = ks if isinstance(ks, int) else ks[1]
+            result = result / (kh * kw)
+        elif isinstance(module, nn.AdaptiveAvgPool2d):
+            # Compute effective kernel size
+            h_in, w_in = input_size
+            out_size = module.output_size
+            oh = out_size if isinstance(out_size, int) else out_size[0]
+            ow = out_size if isinstance(out_size, int) else out_size[1]
+            kh = h_in // oh
+            kw = w_in // ow
+            result = result / (kh * kw)
+
+        return result
 
     def _backward_softmax_stacked(self, module: nn.Softmax, cache: DCCache, stacked_gradients: Tensor) -> Tensor:
         """Backward through Softmax using stacked gradients."""
