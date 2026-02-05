@@ -13,7 +13,7 @@ from .base import (
     cat2, split2, cat4, split4,
     init_catted, init_pos_neg, InputMode,
     ReLUMode, DCCache, recenter_dc, reconstruct_output,
-    DC_ENABLED, DC_ORIGINAL_FORWARD, DC_IS_OUTPUT_LAYER, DC_BETA, DC_RELU_MODE, DC_SPLIT_WEIGHTS_ON_FLY,
+    DC_ENABLED, DC_ORIGINAL_FORWARD, DC_IS_OUTPUT_LAYER, DC_RELU_MODE,
     split_input_4, make_output_4, split_grad_4, make_grad_4, make_input_4,
     # Sensitivity utilities
     Sensitivities, extract_sensitivities,
@@ -75,7 +75,7 @@ __all__ = [
     'cat2', 'split2', 'cat4', 'split4',
     'init_catted', 'init_pos_neg', 'InputMode',
     'ReLUMode', 'DCCache', 'recenter_dc', 'reconstruct_output',
-    'DC_ENABLED', 'DC_ORIGINAL_FORWARD', 'DC_IS_OUTPUT_LAYER', 'DC_BETA', 'DC_RELU_MODE', 'DC_SPLIT_WEIGHTS_ON_FLY',
+    'DC_ENABLED', 'DC_ORIGINAL_FORWARD', 'DC_IS_OUTPUT_LAYER', 'DC_RELU_MODE',
     'split_input_4', 'make_output_4', 'split_grad_4', 'make_grad_4', 'make_input_4',
     # Sensitivity utilities
     'Sensitivities', 'extract_sensitivities',

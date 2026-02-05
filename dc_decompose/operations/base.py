@@ -34,8 +34,6 @@ DC_ENABLED = '_dc_enabled'
 DC_ORIGINAL_FORWARD = '_dc_original_forward'
 DC_RELU_MODE = '_dc_relu_mode'
 DC_IS_OUTPUT_LAYER = '_dc_is_output_layer'
-DC_BETA = '_dc_beta'
-DC_SPLIT_WEIGHTS_ON_FLY = '_dc_split_weights_on_fly'
 
 
 # =============================================================================
@@ -93,29 +91,28 @@ def make_grad_4(delta_pp: Tensor, delta_np: Tensor,
     return cat4(delta_pp, delta_np, delta_pn, delta_nn)
 
 
-def init_backward(grad_4: Tensor, is_output_layer: bool, beta: float = 1.0) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+def init_backward(grad_4: Tensor, is_output_layer: bool) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
     """
     Initialize 4-sensitivities for backward pass.
 
-    For output layers: converts [grad_pos; grad_neg; ...] to proper 4-sensitivities.
+    For output layers: converts original gradient to proper 4-sensitivities.
     For other layers: just splits the incoming gradient.
 
     Args:
-        grad_4: Incoming gradient [4*batch]
+        grad_4: Incoming gradient [4*batch] (for output layer: only first quarter used)
         is_output_layer: Whether this is the output layer
-        beta: Output layer initialization parameter
 
     Returns:
         (delta_pp, delta_np, delta_pn, delta_nn) tuple
     """
     if is_output_layer:
         q = grad_4.shape[0] // 4
-        grad_pos = grad_4[:q]
-        grad_neg = grad_4[q:2*q]
-        delta_pp = beta * grad_pos
-        delta_np = torch.zeros_like(grad_pos)
-        delta_pn = (1 - beta) * grad_neg
-        delta_nn = torch.zeros_like(grad_neg)
+        grad_orig = grad_4[:q]  # Use only first quarter as original gradient
+        # Initialize as: pp=orig, pn=-orig, np=nn=0
+        delta_pp = grad_orig
+        delta_np = torch.zeros_like(grad_orig)
+        delta_pn = -grad_orig
+        delta_nn = torch.zeros_like(grad_orig)
         result = delta_pp, delta_np, delta_pn, delta_nn
 
         # Log output layer initialization
@@ -124,10 +121,10 @@ def init_backward(grad_4: Tensor, is_output_layer: bool, beta: float = 1.0) -> T
             import logging
             log = get_logger('dc.backward')
             if log.isEnabledFor(logging.INFO):
-                log.info(f"init_backward OUTPUT: shape={list(grad_4.shape)}, beta={beta}")
+                log.info(f"init_backward OUTPUT: shape={list(grad_4.shape)}")
             tensor_log = get_logger('dc.tensors')
             if tensor_log.isEnabledFor(TENSOR_LEVEL):
-                tensor_log.log(TENSOR_LEVEL, f"init_bwd: grad_pos={grad_pos.mean().item():.4f}, grad_neg={grad_neg.mean().item():.4f}")
+                tensor_log.log(TENSOR_LEVEL, f"init_bwd: grad_orig={grad_orig.mean().item():.4f}")
         except ImportError:
             pass
 

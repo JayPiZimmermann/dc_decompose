@@ -8,7 +8,7 @@ from typing import Tuple, Type
 from .base import (
     split_input_4, make_output_4, make_grad_4,
     init_backward, recenter_dc,
-    DC_ENABLED, DC_ORIGINAL_FORWARD, DC_RELU_MODE, DC_IS_OUTPUT_LAYER, DC_BETA
+    DC_ENABLED, DC_ORIGINAL_FORWARD, DC_RELU_MODE, DC_IS_OUTPUT_LAYER
 )
 
 DC_BACKPROP_MODE = '_dc_backprop_mode'
@@ -188,7 +188,7 @@ def dc_forward_relu(m: nn.ReLU, x: Tensor) -> Tensor:
     return func.apply(
         x,
         getattr(m, DC_IS_OUTPUT_LAYER, False),
-        getattr(m, DC_BETA, 0.5)
+        getattr(m, 0.5)
     )
 
 
@@ -200,7 +200,7 @@ def patch_relu(m: nn.ReLU, split_mode: str = 'max', backprop_mode: str = 'standa
     setattr(m, DC_BACKPROP_MODE, backprop_mode)
     setattr(m, DC_RELU_FUNCTION, _make_relu_function(split_mode, backprop_mode))
     setattr(m, DC_IS_OUTPUT_LAYER, False)
-    setattr(m, DC_BETA, 0.5)
+    setattr(m, 0.5)
 
     def patched(x):
         if getattr(m, DC_ENABLED, False):
@@ -214,7 +214,7 @@ def patch_relu(m: nn.ReLU, split_mode: str = 'max', backprop_mode: str = 'standa
 def unpatch_relu(m: nn.ReLU) -> None:
     if hasattr(m, DC_ORIGINAL_FORWARD):
         m.forward = getattr(m, DC_ORIGINAL_FORWARD)
-        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_RELU_MODE, DC_BACKPROP_MODE, DC_RELU_FUNCTION, DC_IS_OUTPUT_LAYER, DC_BETA]:
+        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_RELU_MODE, DC_BACKPROP_MODE, DC_RELU_FUNCTION, DC_IS_OUTPUT_LAYER]:
             if hasattr(m, a): delattr(m, a)
 
 

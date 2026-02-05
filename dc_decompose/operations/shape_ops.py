@@ -9,7 +9,7 @@ import torch.nn as nn
 from torch import Tensor
 from typing import Tuple, Union, List
 
-from .base import split_input_4, make_output_4, make_grad_4, init_backward, DC_ENABLED, DC_ORIGINAL_FORWARD, DC_IS_OUTPUT_LAYER, DC_BETA
+from .base import split_input_4, make_output_4, make_grad_4, init_backward, DC_ENABLED, DC_ORIGINAL_FORWARD, DC_IS_OUTPUT_LAYER
 
 
 # =============================================================================
@@ -47,7 +47,7 @@ class DCFlattenFunction(torch.autograd.Function):
 
 def dc_forward_flatten(m: nn.Flatten, x: Tensor) -> Tensor:
     return DCFlattenFunction.apply(x, m.start_dim, m.end_dim,
-                                    getattr(m, DC_IS_OUTPUT_LAYER, False), getattr(m, DC_BETA, 0.5))
+                                    getattr(m, DC_IS_OUTPUT_LAYER, False), getattr(m, 0.5))
 
 
 def patch_flatten(module: nn.Flatten) -> None:
@@ -55,7 +55,7 @@ def patch_flatten(module: nn.Flatten) -> None:
     setattr(module, DC_ORIGINAL_FORWARD, module.forward)
     setattr(module, DC_ENABLED, True)
     setattr(module, DC_IS_OUTPUT_LAYER, False)
-    setattr(module, DC_BETA, 0.5)
+    
 
     def patched(x):
         if getattr(module, DC_ENABLED, False):
@@ -69,7 +69,7 @@ def patch_flatten(module: nn.Flatten) -> None:
 def unpatch_flatten(module: nn.Flatten) -> None:
     if hasattr(module, DC_ORIGINAL_FORWARD):
         module.forward = getattr(module, DC_ORIGINAL_FORWARD)
-        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER, DC_BETA]:
+        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER]:
             if hasattr(module, a): delattr(module, a)
 
 
@@ -110,7 +110,7 @@ class DCUnflattenFunction(torch.autograd.Function):
 
 def dc_forward_unflatten(m: nn.Unflatten, x: Tensor) -> Tensor:
     return DCUnflattenFunction.apply(x, m.dim, m.unflattened_size,
-                                      getattr(m, DC_IS_OUTPUT_LAYER, False), getattr(m, DC_BETA, 0.5))
+                                      getattr(m, DC_IS_OUTPUT_LAYER, False), getattr(m, 0.5))
 
 
 def patch_unflatten(module: nn.Unflatten) -> None:
@@ -118,7 +118,7 @@ def patch_unflatten(module: nn.Unflatten) -> None:
     setattr(module, DC_ORIGINAL_FORWARD, module.forward)
     setattr(module, DC_ENABLED, True)
     setattr(module, DC_IS_OUTPUT_LAYER, False)
-    setattr(module, DC_BETA, 0.5)
+    
 
     def patched(x):
         if getattr(module, DC_ENABLED, False):
@@ -132,7 +132,7 @@ def patch_unflatten(module: nn.Unflatten) -> None:
 def unpatch_unflatten(module: nn.Unflatten) -> None:
     if hasattr(module, DC_ORIGINAL_FORWARD):
         module.forward = getattr(module, DC_ORIGINAL_FORWARD)
-        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER, DC_BETA]:
+        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER]:
             if hasattr(module, a): delattr(module, a)
 
 
@@ -183,7 +183,7 @@ class DCReshapeFunction(torch.autograd.Function):
 
 def dc_forward_reshape(m: Reshape, x: Tensor) -> Tensor:
     return DCReshapeFunction.apply(x, m.shape,
-                                    getattr(m, DC_IS_OUTPUT_LAYER, False), getattr(m, DC_BETA, 0.5))
+                                    getattr(m, DC_IS_OUTPUT_LAYER, False), getattr(m, 0.5))
 
 
 def patch_reshape(module: Reshape) -> None:
@@ -191,7 +191,7 @@ def patch_reshape(module: Reshape) -> None:
     setattr(module, DC_ORIGINAL_FORWARD, module.forward)
     setattr(module, DC_ENABLED, True)
     setattr(module, DC_IS_OUTPUT_LAYER, False)
-    setattr(module, DC_BETA, 0.5)
+    
 
     def patched(x):
         if getattr(module, DC_ENABLED, False):
@@ -205,7 +205,7 @@ def patch_reshape(module: Reshape) -> None:
 def unpatch_reshape(module: Reshape) -> None:
     if hasattr(module, DC_ORIGINAL_FORWARD):
         module.forward = getattr(module, DC_ORIGINAL_FORWARD)
-        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER, DC_BETA]:
+        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER]:
             if hasattr(module, a): delattr(module, a)
 
 
@@ -227,7 +227,7 @@ class View(nn.Module):
 def dc_forward_view(m: View, x: Tensor) -> Tensor:
     # View and reshape have same behavior for DC
     return DCReshapeFunction.apply(x, m.shape,
-                                    getattr(m, DC_IS_OUTPUT_LAYER, False), getattr(m, DC_BETA, 0.5))
+                                    getattr(m, DC_IS_OUTPUT_LAYER, False), getattr(m, 0.5))
 
 
 def patch_view(module: View) -> None:
@@ -235,7 +235,7 @@ def patch_view(module: View) -> None:
     setattr(module, DC_ORIGINAL_FORWARD, module.forward)
     setattr(module, DC_ENABLED, True)
     setattr(module, DC_IS_OUTPUT_LAYER, False)
-    setattr(module, DC_BETA, 0.5)
+    
 
     def patched(x):
         if getattr(module, DC_ENABLED, False):
@@ -249,7 +249,7 @@ def patch_view(module: View) -> None:
 def unpatch_view(module: View) -> None:
     if hasattr(module, DC_ORIGINAL_FORWARD):
         module.forward = getattr(module, DC_ORIGINAL_FORWARD)
-        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER, DC_BETA]:
+        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER]:
             if hasattr(module, a): delattr(module, a)
 
 
@@ -306,7 +306,7 @@ class DCSqueezeFunction(torch.autograd.Function):
 
 def dc_forward_squeeze(m: Squeeze, x: Tensor) -> Tensor:
     return DCSqueezeFunction.apply(x, m.dim,
-                                    getattr(m, DC_IS_OUTPUT_LAYER, False), getattr(m, DC_BETA, 0.5))
+                                    getattr(m, DC_IS_OUTPUT_LAYER, False), getattr(m, 0.5))
 
 
 def patch_squeeze(module: Squeeze) -> None:
@@ -314,7 +314,7 @@ def patch_squeeze(module: Squeeze) -> None:
     setattr(module, DC_ORIGINAL_FORWARD, module.forward)
     setattr(module, DC_ENABLED, True)
     setattr(module, DC_IS_OUTPUT_LAYER, False)
-    setattr(module, DC_BETA, 0.5)
+    
 
     def patched(x):
         if getattr(module, DC_ENABLED, False):
@@ -328,7 +328,7 @@ def patch_squeeze(module: Squeeze) -> None:
 def unpatch_squeeze(module: Squeeze) -> None:
     if hasattr(module, DC_ORIGINAL_FORWARD):
         module.forward = getattr(module, DC_ORIGINAL_FORWARD)
-        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER, DC_BETA]:
+        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER]:
             if hasattr(module, a): delattr(module, a)
 
 
@@ -378,7 +378,7 @@ class DCUnsqueezeFunction(torch.autograd.Function):
 
 def dc_forward_unsqueeze(m: Unsqueeze, x: Tensor) -> Tensor:
     return DCUnsqueezeFunction.apply(x, m.dim,
-                                      getattr(m, DC_IS_OUTPUT_LAYER, False), getattr(m, DC_BETA, 0.5))
+                                      getattr(m, DC_IS_OUTPUT_LAYER, False), getattr(m, 0.5))
 
 
 def patch_unsqueeze(module: Unsqueeze) -> None:
@@ -386,7 +386,7 @@ def patch_unsqueeze(module: Unsqueeze) -> None:
     setattr(module, DC_ORIGINAL_FORWARD, module.forward)
     setattr(module, DC_ENABLED, True)
     setattr(module, DC_IS_OUTPUT_LAYER, False)
-    setattr(module, DC_BETA, 0.5)
+    
 
     def patched(x):
         if getattr(module, DC_ENABLED, False):
@@ -400,7 +400,7 @@ def patch_unsqueeze(module: Unsqueeze) -> None:
 def unpatch_unsqueeze(module: Unsqueeze) -> None:
     if hasattr(module, DC_ORIGINAL_FORWARD):
         module.forward = getattr(module, DC_ORIGINAL_FORWARD)
-        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER, DC_BETA]:
+        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER]:
             if hasattr(module, a): delattr(module, a)
 
 
@@ -452,7 +452,7 @@ class DCTransposeFunction(torch.autograd.Function):
 
 def dc_forward_transpose(m: Transpose, x: Tensor) -> Tensor:
     return DCTransposeFunction.apply(x, m.dim0, m.dim1,
-                                      getattr(m, DC_IS_OUTPUT_LAYER, False), getattr(m, DC_BETA, 0.5))
+                                      getattr(m, DC_IS_OUTPUT_LAYER, False), getattr(m, 0.5))
 
 
 def patch_transpose(module: Transpose) -> None:
@@ -460,7 +460,7 @@ def patch_transpose(module: Transpose) -> None:
     setattr(module, DC_ORIGINAL_FORWARD, module.forward)
     setattr(module, DC_ENABLED, True)
     setattr(module, DC_IS_OUTPUT_LAYER, False)
-    setattr(module, DC_BETA, 0.5)
+    
 
     def patched(x):
         if getattr(module, DC_ENABLED, False):
@@ -474,7 +474,7 @@ def patch_transpose(module: Transpose) -> None:
 def unpatch_transpose(module: Transpose) -> None:
     if hasattr(module, DC_ORIGINAL_FORWARD):
         module.forward = getattr(module, DC_ORIGINAL_FORWARD)
-        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER, DC_BETA]:
+        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER]:
             if hasattr(module, a): delattr(module, a)
 
 
@@ -529,7 +529,7 @@ class DCPermuteFunction(torch.autograd.Function):
 
 def dc_forward_permute(m: Permute, x: Tensor) -> Tensor:
     return DCPermuteFunction.apply(x, m.dims,
-                                    getattr(m, DC_IS_OUTPUT_LAYER, False), getattr(m, DC_BETA, 0.5))
+                                    getattr(m, DC_IS_OUTPUT_LAYER, False), getattr(m, 0.5))
 
 
 def patch_permute(module: Permute) -> None:
@@ -537,7 +537,7 @@ def patch_permute(module: Permute) -> None:
     setattr(module, DC_ORIGINAL_FORWARD, module.forward)
     setattr(module, DC_ENABLED, True)
     setattr(module, DC_IS_OUTPUT_LAYER, False)
-    setattr(module, DC_BETA, 0.5)
+    
 
     def patched(x):
         if getattr(module, DC_ENABLED, False):
@@ -551,7 +551,7 @@ def patch_permute(module: Permute) -> None:
 def unpatch_permute(module: Permute) -> None:
     if hasattr(module, DC_ORIGINAL_FORWARD):
         module.forward = getattr(module, DC_ORIGINAL_FORWARD)
-        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER, DC_BETA]:
+        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER]:
             if hasattr(module, a): delattr(module, a)
 
 
@@ -576,7 +576,7 @@ class DCDropoutFunction(torch.autograd.Function):
 
 def dc_forward_dropout(m: nn.Dropout, x: Tensor) -> Tensor:
     return DCDropoutFunction.apply(x,
-                                    getattr(m, DC_IS_OUTPUT_LAYER, False), getattr(m, DC_BETA, 0.5))
+                                    getattr(m, DC_IS_OUTPUT_LAYER, False), getattr(m, 0.5))
 
 
 def patch_dropout(module: nn.Dropout) -> None:
@@ -584,7 +584,7 @@ def patch_dropout(module: nn.Dropout) -> None:
     setattr(module, DC_ORIGINAL_FORWARD, module.forward)
     setattr(module, DC_ENABLED, True)
     setattr(module, DC_IS_OUTPUT_LAYER, False)
-    setattr(module, DC_BETA, 0.5)
+    
 
     def patched(x):
         if getattr(module, DC_ENABLED, False):
@@ -598,5 +598,5 @@ def patch_dropout(module: nn.Dropout) -> None:
 def unpatch_dropout(module: nn.Dropout) -> None:
     if hasattr(module, DC_ORIGINAL_FORWARD):
         module.forward = getattr(module, DC_ORIGINAL_FORWARD)
-        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER, DC_BETA]:
+        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER]:
             if hasattr(module, a): delattr(module, a)

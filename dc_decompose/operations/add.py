@@ -14,7 +14,7 @@ from torch import Tensor
 
 from .base import (
     recenter_dc,
-    DC_ENABLED, DC_ORIGINAL_FORWARD, DC_IS_OUTPUT_LAYER, DC_BETA
+    DC_ENABLED, DC_ORIGINAL_FORWARD, DC_IS_OUTPUT_LAYER
 )
 
 
@@ -58,7 +58,7 @@ def patch_add(module: Add) -> None:
     setattr(module, DC_ORIGINAL_FORWARD, module.forward)
     setattr(module, DC_ENABLED, True)
     setattr(module, DC_IS_OUTPUT_LAYER, False)
-    setattr(module, DC_BETA, 0.5)
+    
 
     def patched(x, y):
         if getattr(module, DC_ENABLED, False):

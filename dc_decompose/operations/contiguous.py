@@ -13,7 +13,7 @@ from typing import Tuple
 from .base import (
     split_input_4, make_output_4, make_grad_4,
     init_backward, recenter_forward,
-    DC_ENABLED, DC_ORIGINAL_FORWARD, DC_IS_OUTPUT_LAYER, DC_BETA
+    DC_ENABLED, DC_ORIGINAL_FORWARD, DC_IS_OUTPUT_LAYER
 )
 
 
@@ -62,7 +62,7 @@ def dc_forward_contiguous(module: Contiguous, input: Tensor) -> Tensor:
     return DCContiguousFunction.apply(
         input,
         getattr(module, DC_IS_OUTPUT_LAYER, False),
-        getattr(module, DC_BETA, 0.5)
+        0.5
     )
 
 
@@ -73,7 +73,7 @@ def patch_contiguous(module: Contiguous) -> None:
     setattr(module, DC_ORIGINAL_FORWARD, module.forward)
     setattr(module, DC_ENABLED, True)
     setattr(module, DC_IS_OUTPUT_LAYER, False)
-    setattr(module, DC_BETA, 0.5)
+    
 
     def patched(input):
         if getattr(module, DC_ENABLED, False):
@@ -88,6 +88,6 @@ def unpatch_contiguous(module: Contiguous) -> None:
     """Unpatch Contiguous module."""
     if hasattr(module, DC_ORIGINAL_FORWARD):
         module.forward = getattr(module, DC_ORIGINAL_FORWARD)
-        for attr in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER, DC_BETA]:
+        for attr in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER]:
             if hasattr(module, attr):
                 delattr(module, attr)

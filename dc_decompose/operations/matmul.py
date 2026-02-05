@@ -9,7 +9,7 @@ from typing import Tuple, Optional
 from .base import (
     split_input_4, make_output_4, make_grad_4,
     init_backward, recenter_forward,
-    DC_ENABLED, DC_ORIGINAL_FORWARD, DC_IS_OUTPUT_LAYER, DC_BETA, DC_SPLIT_WEIGHTS_ON_FLY
+    DC_ENABLED, DC_ORIGINAL_FORWARD, DC_IS_OUTPUT_LAYER, DC_SPLIT_WEIGHTS_ON_FLY
 )
 
 
@@ -164,7 +164,7 @@ def dc_forward_matmul(module: DCMatMul, A: Tensor, B: Optional[Tensor] = None) -
     return DCMatMulFunction.apply(
         A, operand_4, module.transpose_b,
         getattr(module, DC_IS_OUTPUT_LAYER, False),
-        getattr(module, DC_BETA, 0.5)
+        0.5
     )
 
 
@@ -175,7 +175,7 @@ def patch_dcmatmul(module: DCMatMul) -> None:
     setattr(module, DC_ORIGINAL_FORWARD, module.forward)
     setattr(module, DC_ENABLED, True)
     setattr(module, DC_IS_OUTPUT_LAYER, False)
-    setattr(module, DC_BETA, 0.5)
+    
 
     def patched(A, B=None):
         if getattr(module, DC_ENABLED, False):
@@ -190,6 +190,6 @@ def unpatch_dcmatmul(module: DCMatMul) -> None:
     """Unpatch DCMatMul module."""
     if hasattr(module, DC_ORIGINAL_FORWARD):
         module.forward = getattr(module, DC_ORIGINAL_FORWARD)
-        for attr in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER, DC_BETA]:
+        for attr in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER]:
             if hasattr(module, attr):
                 delattr(module, attr)

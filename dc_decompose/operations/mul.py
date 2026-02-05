@@ -9,7 +9,7 @@ from typing import Tuple, Optional
 from .base import (
     split_input_4, make_output_4, make_grad_4,
     init_backward, recenter_forward,
-    DC_ENABLED, DC_ORIGINAL_FORWARD, DC_IS_OUTPUT_LAYER, DC_BETA
+    DC_ENABLED, DC_ORIGINAL_FORWARD, DC_IS_OUTPUT_LAYER
 )
 
 
@@ -146,7 +146,7 @@ def dc_forward_mul(module: DCMul, A: Tensor, B: Optional[Tensor] = None) -> Tens
         return DCScalarMulFunction.apply(
             A, module.scalar,
             getattr(module, DC_IS_OUTPUT_LAYER, False),
-            getattr(module, DC_BETA, 0.5)
+            0.5
         )
     elif B is not None:
         # Element-wise multiplication
@@ -154,7 +154,7 @@ def dc_forward_mul(module: DCMul, A: Tensor, B: Optional[Tensor] = None) -> Tens
         return DCMulFunction.apply(
             A, operand_4,
             getattr(module, DC_IS_OUTPUT_LAYER, False),
-            getattr(module, DC_BETA, 0.5)
+            0.5
         )
     else:
         raise ValueError("Either provide B tensor or set scalar in __init__")
@@ -167,7 +167,7 @@ def patch_dcmul(module: DCMul) -> None:
     setattr(module, DC_ORIGINAL_FORWARD, module.forward)
     setattr(module, DC_ENABLED, True)
     setattr(module, DC_IS_OUTPUT_LAYER, False)
-    setattr(module, DC_BETA, 0.5)
+    
 
     def patched(A, B=None):
         if getattr(module, DC_ENABLED, False):
@@ -182,6 +182,6 @@ def unpatch_dcmul(module: DCMul) -> None:
     """Unpatch DCMul module."""
     if hasattr(module, DC_ORIGINAL_FORWARD):
         module.forward = getattr(module, DC_ORIGINAL_FORWARD)
-        for attr in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER, DC_BETA]:
+        for attr in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER]:
             if hasattr(module, attr):
                 delattr(module, attr)

@@ -15,7 +15,7 @@ from typing import Tuple, Optional
 from .base import (
     split_input_4, make_output_4, make_grad_4,
     init_backward, recenter_forward,
-    DC_ENABLED, DC_ORIGINAL_FORWARD, DC_IS_OUTPUT_LAYER, DC_BETA
+    DC_ENABLED, DC_ORIGINAL_FORWARD, DC_IS_OUTPUT_LAYER
 )
 
 
@@ -144,7 +144,7 @@ def dc_forward_softmax(module: nn.Softmax, x: Tensor) -> Tensor:
     return DCSoftmaxFunction.apply(
         x, module.dim,
         getattr(module, DC_IS_OUTPUT_LAYER, False),
-        getattr(module, DC_BETA, 0.5)
+        0.5
     )
 
 
@@ -154,7 +154,7 @@ def patch_softmax(module: nn.Softmax) -> None:
     setattr(module, DC_ORIGINAL_FORWARD, module.forward)
     setattr(module, DC_ENABLED, True)
     setattr(module, DC_IS_OUTPUT_LAYER, False)
-    setattr(module, DC_BETA, 0.5)
+    
 
     def patched(x):
         if getattr(module, DC_ENABLED, False):
@@ -168,6 +168,6 @@ def patch_softmax(module: nn.Softmax) -> None:
 def unpatch_softmax(module: nn.Softmax) -> None:
     if hasattr(module, DC_ORIGINAL_FORWARD):
         module.forward = getattr(module, DC_ORIGINAL_FORWARD)
-        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER, DC_BETA]:
+        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER]:
             if hasattr(module, a):
                 delattr(module, a)

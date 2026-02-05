@@ -12,7 +12,7 @@ from typing import Tuple
 from .base import (
     split_input_4, make_output_4, make_grad_4,
     init_backward, recenter_forward,
-    DC_ENABLED, DC_ORIGINAL_FORWARD, DC_IS_OUTPUT_LAYER, DC_BETA
+    DC_ENABLED, DC_ORIGINAL_FORWARD, DC_IS_OUTPUT_LAYER
 )
 
 
@@ -65,7 +65,7 @@ def dc_forward_embedding(module: nn.Embedding, input: Tensor) -> Tensor:
         input, module.weight, module.padding_idx, module.max_norm, 
         module.norm_type, module.scale_grad_by_freq, module.sparse,
         getattr(module, DC_IS_OUTPUT_LAYER, False),
-        getattr(module, DC_BETA, 0.5)
+        0.5
     )
 
 
@@ -76,7 +76,7 @@ def patch_embedding(module: nn.Embedding) -> None:
     setattr(module, DC_ORIGINAL_FORWARD, module.forward)
     setattr(module, DC_ENABLED, True)
     setattr(module, DC_IS_OUTPUT_LAYER, False)
-    setattr(module, DC_BETA, 0.5)
+    
 
     def patched(input):
         if getattr(module, DC_ENABLED, False):
@@ -91,6 +91,6 @@ def unpatch_embedding(module: nn.Embedding) -> None:
     """Unpatch Embedding module."""
     if hasattr(module, DC_ORIGINAL_FORWARD):
         module.forward = getattr(module, DC_ORIGINAL_FORWARD)
-        for attr in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER, DC_BETA]:
+        for attr in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER]:
             if hasattr(module, attr):
                 delattr(module, attr)

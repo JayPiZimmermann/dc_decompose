@@ -13,7 +13,7 @@ from typing import Tuple, List
 from .base import (
     split_input_4, make_output_4, make_grad_4,
     init_backward, recenter_forward,
-    DC_ENABLED, DC_ORIGINAL_FORWARD, DC_IS_OUTPUT_LAYER, DC_BETA
+    DC_ENABLED, DC_ORIGINAL_FORWARD, DC_IS_OUTPUT_LAYER
 )
 
 
@@ -111,7 +111,7 @@ def dc_forward_layernorm(module: nn.LayerNorm, x: Tensor) -> Tensor:
         x, list(module.normalized_shape),
         module.weight, module.bias, module.eps,
         getattr(module, DC_IS_OUTPUT_LAYER, False),
-        getattr(module, DC_BETA, 0.5)
+        0.5
     )
 
 
@@ -121,7 +121,7 @@ def patch_layernorm(module: nn.LayerNorm) -> None:
     setattr(module, DC_ORIGINAL_FORWARD, module.forward)
     setattr(module, DC_ENABLED, True)
     setattr(module, DC_IS_OUTPUT_LAYER, False)
-    setattr(module, DC_BETA, 0.5)
+    
 
     def patched(x):
         if getattr(module, DC_ENABLED, False):
@@ -135,6 +135,6 @@ def patch_layernorm(module: nn.LayerNorm) -> None:
 def unpatch_layernorm(module: nn.LayerNorm) -> None:
     if hasattr(module, DC_ORIGINAL_FORWARD):
         module.forward = getattr(module, DC_ORIGINAL_FORWARD)
-        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER, DC_BETA]:
+        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER]:
             if hasattr(module, a):
                 delattr(module, a)

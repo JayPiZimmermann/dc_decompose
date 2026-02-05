@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from torch import Tensor
 from typing import Optional, Tuple
 
-from .base import split_input_4, make_output_4, make_grad_4, init_backward, DC_ENABLED, DC_ORIGINAL_FORWARD, DC_IS_OUTPUT_LAYER, DC_BETA
+from .base import split_input_4, make_output_4, make_grad_4, init_backward, DC_ENABLED, DC_ORIGINAL_FORWARD, DC_IS_OUTPUT_LAYER
 
 
 class DCConvTranspose2dFunction(torch.autograd.Function):
@@ -107,14 +107,14 @@ def dc_forward_conv_transpose2d(m: nn.ConvTranspose2d, x: Tensor) -> Tensor:
     dilation = m.dilation if isinstance(m.dilation, tuple) else (m.dilation, m.dilation)
     return DCConvTranspose2dFunction.apply(
         x, m.weight, m.bias, stride, padding, output_padding, dilation, m.groups,
-        getattr(m, DC_IS_OUTPUT_LAYER, False), getattr(m, DC_BETA, 0.5)
+        getattr(m, DC_IS_OUTPUT_LAYER, False), getattr(m, 0.5)
     )
 
 
 def dc_forward_conv_transpose1d(m: nn.ConvTranspose1d, x: Tensor) -> Tensor:
     return DCConvTranspose1dFunction.apply(
         x, m.weight, m.bias, m.stride[0], m.padding[0], m.output_padding[0], m.dilation[0], m.groups,
-        getattr(m, DC_IS_OUTPUT_LAYER, False), getattr(m, DC_BETA, 0.5)
+        getattr(m, DC_IS_OUTPUT_LAYER, False), getattr(m, 0.5)
     )
 
 
@@ -123,7 +123,7 @@ def patch_conv_transpose2d(m: nn.ConvTranspose2d) -> None:
     setattr(m, DC_ORIGINAL_FORWARD, m.forward)
     setattr(m, DC_ENABLED, True)
     setattr(m, DC_IS_OUTPUT_LAYER, False)
-    setattr(m, DC_BETA, 0.5)
+    setattr(m, 0.5)
 
     def patched(x):
         if getattr(m, DC_ENABLED, False):
@@ -139,7 +139,7 @@ def patch_conv_transpose1d(m: nn.ConvTranspose1d) -> None:
     setattr(m, DC_ORIGINAL_FORWARD, m.forward)
     setattr(m, DC_ENABLED, True)
     setattr(m, DC_IS_OUTPUT_LAYER, False)
-    setattr(m, DC_BETA, 0.5)
+    setattr(m, 0.5)
 
     def patched(x):
         if getattr(m, DC_ENABLED, False):
@@ -153,12 +153,12 @@ def patch_conv_transpose1d(m: nn.ConvTranspose1d) -> None:
 def unpatch_conv_transpose2d(m: nn.ConvTranspose2d) -> None:
     if hasattr(m, DC_ORIGINAL_FORWARD):
         m.forward = getattr(m, DC_ORIGINAL_FORWARD)
-        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER, DC_BETA]:
+        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER]:
             if hasattr(m, a): delattr(m, a)
 
 
 def unpatch_conv_transpose1d(m: nn.ConvTranspose1d) -> None:
     if hasattr(m, DC_ORIGINAL_FORWARD):
         m.forward = getattr(m, DC_ORIGINAL_FORWARD)
-        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER, DC_BETA]:
+        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER]:
             if hasattr(m, a): delattr(m, a)

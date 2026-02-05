@@ -21,7 +21,7 @@ import torch.nn as nn
 from contextlib import contextmanager
 from typing import Optional, List
 
-from .operations.base import DC_ENABLED, DC_ORIGINAL_FORWARD, DC_IS_OUTPUT_LAYER, DC_BETA
+from .operations.base import DC_ENABLED, DC_ORIGINAL_FORWARD, DC_IS_OUTPUT_LAYER
 from .operations.linear import patch_linear, unpatch_linear
 from .operations.conv import patch_conv2d, unpatch_conv2d, patch_conv1d, unpatch_conv1d
 from .operations.conv_transpose import patch_conv_transpose1d, patch_conv_transpose2d, unpatch_conv_transpose1d, unpatch_conv_transpose2d

@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from torch import Tensor
 from typing import Tuple, Union
 
-from .base import split_input_4, make_output_4, DC_ENABLED, DC_ORIGINAL_FORWARD, DC_IS_OUTPUT_LAYER, DC_BETA
+from .base import split_input_4, make_output_4, DC_ENABLED, DC_ORIGINAL_FORWARD, DC_IS_OUTPUT_LAYER
 
 
 # For linear operations like AvgPool, we don't need custom autograd.Function
@@ -80,7 +80,7 @@ def patch_avgpool2d(module: nn.AvgPool2d) -> None:
     setattr(module, DC_ORIGINAL_FORWARD, module.forward)
     setattr(module, DC_ENABLED, True)
     setattr(module, DC_IS_OUTPUT_LAYER, False)
-    setattr(module, DC_BETA, 0.5)
+    
 
     def patched(x):
         if getattr(module, DC_ENABLED, False):
@@ -96,7 +96,7 @@ def patch_avgpool1d(module: nn.AvgPool1d) -> None:
     setattr(module, DC_ORIGINAL_FORWARD, module.forward)
     setattr(module, DC_ENABLED, True)
     setattr(module, DC_IS_OUTPUT_LAYER, False)
-    setattr(module, DC_BETA, 0.5)
+    
 
     def patched(x):
         if getattr(module, DC_ENABLED, False):
@@ -112,7 +112,7 @@ def patch_adaptive_avgpool2d(module: nn.AdaptiveAvgPool2d) -> None:
     setattr(module, DC_ORIGINAL_FORWARD, module.forward)
     setattr(module, DC_ENABLED, True)
     setattr(module, DC_IS_OUTPUT_LAYER, False)
-    setattr(module, DC_BETA, 0.5)
+    
 
     def patched(x):
         if getattr(module, DC_ENABLED, False):
@@ -128,7 +128,7 @@ def patch_adaptive_avgpool1d(module: nn.AdaptiveAvgPool1d) -> None:
     setattr(module, DC_ORIGINAL_FORWARD, module.forward)
     setattr(module, DC_ENABLED, True)
     setattr(module, DC_IS_OUTPUT_LAYER, False)
-    setattr(module, DC_BETA, 0.5)
+    
 
     def patched(x):
         if getattr(module, DC_ENABLED, False):
@@ -143,26 +143,26 @@ def patch_adaptive_avgpool1d(module: nn.AdaptiveAvgPool1d) -> None:
 def unpatch_avgpool2d(module: nn.AvgPool2d) -> None:
     if hasattr(module, DC_ORIGINAL_FORWARD):
         module.forward = getattr(module, DC_ORIGINAL_FORWARD)
-        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER, DC_BETA]:
+        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER]:
             if hasattr(module, a): delattr(module, a)
 
 
 def unpatch_avgpool1d(module: nn.AvgPool1d) -> None:
     if hasattr(module, DC_ORIGINAL_FORWARD):
         module.forward = getattr(module, DC_ORIGINAL_FORWARD)
-        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER, DC_BETA]:
+        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER]:
             if hasattr(module, a): delattr(module, a)
 
 
 def unpatch_adaptive_avgpool2d(module: nn.AdaptiveAvgPool2d) -> None:
     if hasattr(module, DC_ORIGINAL_FORWARD):
         module.forward = getattr(module, DC_ORIGINAL_FORWARD)
-        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER, DC_BETA]:
+        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER]:
             if hasattr(module, a): delattr(module, a)
 
 
 def unpatch_adaptive_avgpool1d(module: nn.AdaptiveAvgPool1d) -> None:
     if hasattr(module, DC_ORIGINAL_FORWARD):
         module.forward = getattr(module, DC_ORIGINAL_FORWARD)
-        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER, DC_BETA]:
+        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER]:
             if hasattr(module, a): delattr(module, a)
