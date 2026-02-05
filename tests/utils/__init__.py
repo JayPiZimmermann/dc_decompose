@@ -18,6 +18,8 @@ from .dc_tester import (
     # Main testing functions
     run_model_tests,
     test_model,
+    test_model_functional,
+    test_model_context_manager,
     test_model_simple,
 
     # Result classes
@@ -37,6 +39,8 @@ from .dc_tester import (
 __all__ = [
     'run_model_tests',
     'test_model',
+    'test_model_functional',
+    'test_model_context_manager',
     'test_model_simple',
     'TestResult',
     'LayerResult',

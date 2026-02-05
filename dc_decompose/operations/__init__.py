@@ -15,9 +15,13 @@ from .base import (
     ReLUMode, DCCache, recenter_dc, reconstruct_output,
     DC_ENABLED, DC_ORIGINAL_FORWARD, DC_IS_OUTPUT_LAYER, DC_BETA, DC_RELU_MODE,
     split_input_4, make_output_4, split_grad_4, make_grad_4, make_input_4,
+    # Sensitivity utilities
+    Sensitivities, extract_sensitivities,
+    # Context manager API
+    DCForward, dc_forward,
 )
 
-from .add import Add, DCAdd, dc_add, DCAddFunction, patch_add, unpatch_add
+from .add import Add, DCAdd, dc_add, patch_add, unpatch_add
 
 from .linear import patch_linear, unpatch_linear, DCLinearFunction
 from .conv import (
@@ -65,8 +69,12 @@ __all__ = [
     'ReLUMode', 'DCCache', 'recenter_dc', 'reconstruct_output',
     'DC_ENABLED', 'DC_ORIGINAL_FORWARD', 'DC_IS_OUTPUT_LAYER', 'DC_BETA', 'DC_RELU_MODE',
     'split_input_4', 'make_output_4', 'split_grad_4', 'make_grad_4', 'make_input_4',
+    # Sensitivity utilities
+    'Sensitivities', 'extract_sensitivities',
+    # Context manager API
+    'DCForward', 'dc_forward',
     # Add
-    'Add', 'DCAdd', 'dc_add', 'DCAddFunction', 'patch_add', 'unpatch_add',
+    'Add', 'DCAdd', 'dc_add', 'patch_add', 'unpatch_add',
     # Linear
     'patch_linear', 'unpatch_linear', 'DCLinearFunction',
     # Conv

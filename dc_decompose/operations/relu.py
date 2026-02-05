@@ -7,7 +7,7 @@ from typing import Tuple, Type
 
 from .base import (
     split_input_4, make_output_4, make_grad_4,
-    init_backward, recenter_forward,
+    init_backward, recenter_dc,
     DC_ENABLED, DC_ORIGINAL_FORWARD, DC_RELU_MODE, DC_IS_OUTPUT_LAYER, DC_BETA
 )
 
@@ -109,7 +109,7 @@ def _make_relu_function(split_mode: str, backprop_mode: str) -> Type[torch.autog
             ctx.is_output_layer, ctx.beta = is_output_layer, beta
 
             output = make_output_4(out_pos, out_neg)
-            return recenter_forward(output)
+            return recenter_dc(output)
 
         @staticmethod
         def backward(ctx, grad_4: Tensor) -> Tuple[Tensor, None, None]:
@@ -118,14 +118,6 @@ def _make_relu_function(split_mode: str, backprop_mode: str) -> Type[torch.autog
 
             delta_pp, delta_np, delta_pn, delta_nn = init_backward(
                 grad_4, ctx.is_output_layer, ctx.beta)
-
-            # For intermediate layers: reconstruct and re-split for ReLU backward
-            if not ctx.is_output_layer:
-                g = delta_pp - delta_np - delta_pn + delta_nn
-                delta_pp = g
-                delta_np = -g * mn
-                delta_pn = torch.zeros_like(g)
-                delta_nn = torch.zeros_like(g)
 
             new_pp, new_np, new_pn, new_nn = backward_relu(
                 delta_pp, delta_np, delta_pn, delta_nn, mp, mn, split_mode, backprop_mode)

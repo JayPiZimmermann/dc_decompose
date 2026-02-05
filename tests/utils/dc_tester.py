@@ -2,7 +2,13 @@
 DC Decomposition Testing Utilities.
 
 Provides a unified testing API for DC decomposition validation.
-All test files should use these utilities - no testing logic in test files.
+Tests verify:
+1. Forward: DC output (pos - neg) matches original output
+2. Backward: Reconstructed gradient (pp - np - pn + nn) matches original gradient
+
+Two APIs are tested:
+- Functional API: init_catted + reconstruct_output
+- Context Manager API: dc_forward
 
 Usage:
     from utils import run_model_tests
@@ -30,7 +36,8 @@ from dataclasses import dataclass, field
 
 from dc_decompose.patcher import prepare_model_for_dc, unpatch_model
 from dc_decompose.operations.base import (
-    init_catted, reconstruct_output, InputMode, split4
+    init_catted, reconstruct_output, InputMode, split4,
+    Sensitivities, extract_sensitivities, dc_forward,
 )
 
 
@@ -86,6 +93,9 @@ class TestResult:
 
     # Layer-wise results
     layer_results: List[LayerResult] = field(default_factory=list)
+
+    # API used for this test
+    api_used: str = "functional"
 
     # Tolerances used
     fwd_abs_tol: float = DEFAULT_FWD_ABS_TOL
@@ -173,7 +183,7 @@ class LayerCache:
                     def hook(m, grad_in, grad_out):
                         if grad_in[0] is not None:
                             grad = grad_in[0].detach()
-                            # Reconstruct from [4*batch] format
+                            # Reconstruct from [4*batch] sensitivities
                             if grad.shape[0] % 4 == 0:
                                 q = grad.shape[0] // 4
                                 pp, np, pn, nn = grad[:q], grad[q:2*q], grad[2*q:3*q], grad[3*q:]
@@ -199,30 +209,12 @@ class LayerCache:
 
     def compute_errors(self, fwd_abs_tol: float, fwd_rel_tol: float,
                        bwd_abs_tol: float, bwd_rel_tol: float,
-                       input_orig: Optional[Tensor] = None,
-                       input_dc: Optional[Tensor] = None,
-                       input_grad_orig: Optional[Tensor] = None,
-                       input_grad_dc: Optional[Tensor] = None,
                        output_orig: Optional[Tensor] = None,
-                       output_dc: Optional[Tensor] = None) -> List[LayerResult]:
-        """Compute layer-wise errors including input/output."""
+                       output_dc: Optional[Tensor] = None,
+                       sens_grad: Optional[Tensor] = None,
+                       orig_grad: Optional[Tensor] = None) -> List[LayerResult]:
+        """Compute layer-wise errors."""
         results = []
-
-        # Input layer (init_catted forward)
-        if input_orig is not None and input_dc is not None:
-            lr = LayerResult(name=">>> INPUT", module_type="init_catted")
-            # Forward: input should be identical (just reformatted)
-            diff = (input_orig - input_dc).abs()
-            lr.fwd_abs_error = diff.max().item()
-            lr.fwd_rel_error = lr.fwd_abs_error / (input_orig.abs().max().item() + 1e-10)
-            lr.fwd_pass = lr.fwd_abs_error < fwd_abs_tol or lr.fwd_rel_error < fwd_rel_tol
-            # Backward: gradient at input
-            if input_grad_orig is not None and input_grad_dc is not None:
-                diff = (input_grad_orig - input_grad_dc).abs()
-                lr.bwd_abs_error = diff.max().item()
-                lr.bwd_rel_error = lr.bwd_abs_error / (input_grad_orig.abs().max().item() + 1e-10)
-                lr.bwd_pass = lr.bwd_abs_error < bwd_abs_tol or lr.bwd_rel_error < bwd_rel_tol
-            results.append(lr)
 
         # Model layers
         for name in self.layer_order:
@@ -258,7 +250,24 @@ class LayerCache:
             lr.fwd_abs_error = diff.max().item()
             lr.fwd_rel_error = lr.fwd_abs_error / (output_orig.abs().max().item() + 1e-10)
             lr.fwd_pass = lr.fwd_abs_error < fwd_abs_tol or lr.fwd_rel_error < fwd_rel_tol
+            # Backward at output is just the initialization, no error there
+            lr.bwd_abs_error = 0.0
+            lr.bwd_rel_error = 0.0
+            lr.bwd_pass = True
             results.append(lr)
+
+        # Input layer (sensitivities -> reconstructed gradient)
+        if sens_grad is not None and orig_grad is not None:
+            lr = LayerResult(name=">>> INPUT", module_type="sensitivities")
+            lr.fwd_abs_error = 0.0
+            lr.fwd_rel_error = 0.0
+            lr.fwd_pass = True
+            diff = (sens_grad - orig_grad).abs()
+            lr.bwd_abs_error = diff.max().item()
+            lr.bwd_rel_error = lr.bwd_abs_error / (orig_grad.abs().max().item() + 1e-10)
+            lr.bwd_pass = lr.bwd_abs_error < bwd_abs_tol or lr.bwd_rel_error < bwd_rel_tol
+            # Insert at beginning
+            results.insert(0, lr)
 
         return results
 
@@ -272,7 +281,7 @@ def check_pass(abs_err: float, rel_err: float, abs_tol: float, rel_tol: float) -
     return abs_err < abs_tol or rel_err < rel_tol
 
 
-def test_model(
+def test_model_functional(
     model: nn.Module,
     x: Tensor,
     name: str = "model",
@@ -281,10 +290,11 @@ def test_model(
     bwd_abs_tol: float = DEFAULT_BWD_ABS_TOL,
     bwd_rel_tol: float = DEFAULT_BWD_REL_TOL,
 ) -> TestResult:
-    """Test a model's DC decomposition with layer-wise error tracking."""
+    """Test using the functional API (init_catted + reconstruct_output)."""
 
     result = TestResult(
         name=name,
+        api_used="functional",
         fwd_abs_tol=fwd_abs_tol,
         fwd_rel_tol=fwd_rel_tol,
         bwd_abs_tol=bwd_abs_tol,
@@ -313,34 +323,36 @@ def test_model(
         cache._remove_hooks()
 
         # =====================================================================
-        # Phase 2: DC forward/backward with hooks
+        # Phase 2: DC forward/backward using FUNCTIONAL API
         # =====================================================================
         model_dc = copy.deepcopy(model)
         model_dc = prepare_model_for_dc(model_dc)
         cache.register_dc_hooks(model_dc)
 
-        x_dc = x.clone().requires_grad_(True)
-        x_cat = init_catted(x_dc, InputMode.CENTER)
+        # Functional API: init_catted is preprocessing (detached)
+        x_cat = init_catted(x, InputMode.CENTER)
         out_cat = model_dc(x_cat)
-        dc_out = reconstruct_output(out_cat)
+        dc_out = reconstruct_output(out_cat, beta=1.0)
         dc_out.backward(target_grad)
-        grad_dc = x_dc.grad
+
+        # Get sensitivities and reconstruct gradient
+        sens = extract_sensitivities(x_cat.grad)
+        grad_dc = sens.reconstruct_gradient()
 
         cache._remove_hooks()
         unpatch_model(model_dc)
 
         # =====================================================================
-        # Compute layer-wise errors (including input/output)
+        # Compute layer-wise errors
         # =====================================================================
         result.layer_results = cache.compute_errors(
             fwd_abs_tol, fwd_rel_tol, bwd_abs_tol, bwd_rel_tol,
-            input_orig=x, input_dc=x,  # Same input
-            input_grad_orig=grad_orig, input_grad_dc=grad_dc,
-            output_orig=orig_out.detach(), output_dc=dc_out.detach()
+            output_orig=orig_out.detach(), output_dc=dc_out.detach(),
+            sens_grad=grad_dc, orig_grad=grad_orig
         )
 
         # =====================================================================
-        # Compute overall errors (max across layers + input/output)
+        # Compute overall errors
         # =====================================================================
 
         # Forward: compare final output
@@ -348,7 +360,6 @@ def test_model(
         result.fwd_abs_error = fwd_diff.max().item()
         result.fwd_rel_error = result.fwd_abs_error / (orig_out.abs().max().item() + 1e-10)
 
-        # Also consider max layer error
         for lr in result.layer_results:
             if lr.fwd_abs_error > result.fwd_abs_error:
                 result.fwd_abs_error = lr.fwd_abs_error
@@ -360,12 +371,11 @@ def test_model(
             fwd_abs_tol, fwd_rel_tol
         )
 
-        # Backward: compare input gradient
+        # Backward: compare reconstructed gradient
         bwd_diff = (grad_orig - grad_dc).abs()
         result.bwd_abs_error = bwd_diff.max().item()
         result.bwd_rel_error = result.bwd_abs_error / (grad_orig.abs().max().item() + 1e-10)
 
-        # Also consider max layer error
         for lr in result.layer_results:
             if lr.bwd_abs_error > result.bwd_abs_error:
                 result.bwd_abs_error = lr.bwd_abs_error
@@ -381,10 +391,149 @@ def test_model(
 
     except Exception as e:
         import traceback
-        result.error_message = str(e)
+        result.error_message = f"{e}\n{traceback.format_exc()}"
         result.success = False
 
     return result
+
+
+def test_model_context_manager(
+    model: nn.Module,
+    x: Tensor,
+    name: str = "model",
+    fwd_abs_tol: float = DEFAULT_FWD_ABS_TOL,
+    fwd_rel_tol: float = DEFAULT_FWD_REL_TOL,
+    bwd_abs_tol: float = DEFAULT_BWD_ABS_TOL,
+    bwd_rel_tol: float = DEFAULT_BWD_REL_TOL,
+) -> TestResult:
+    """Test using the context manager API (dc_forward)."""
+
+    result = TestResult(
+        name=name,
+        api_used="context_manager",
+        fwd_abs_tol=fwd_abs_tol,
+        fwd_rel_tol=fwd_rel_tol,
+        bwd_abs_tol=bwd_abs_tol,
+        bwd_rel_tol=bwd_rel_tol,
+    )
+
+    cache = LayerCache()
+
+    try:
+        model = copy.deepcopy(model)
+        model.eval()
+
+        # =====================================================================
+        # Phase 1: Original forward/backward with hooks
+        # =====================================================================
+        model_orig = copy.deepcopy(model)
+        model_orig.eval()
+        cache.register_orig_hooks(model_orig)
+
+        x_orig = x.clone().requires_grad_(True)
+        orig_out = model_orig(x_orig)
+        target_grad = torch.randn_like(orig_out)
+        orig_out.backward(target_grad)
+        grad_orig = x_orig.grad.clone()
+
+        cache._remove_hooks()
+
+        # =====================================================================
+        # Phase 2: DC forward/backward using CONTEXT MANAGER API
+        # =====================================================================
+        model_dc = copy.deepcopy(model)
+        model_dc = prepare_model_for_dc(model_dc)
+        cache.register_dc_hooks(model_dc)
+
+        with dc_forward(model_dc, x, beta=1.0) as dc:
+            dc_out = dc.output
+            dc_out.backward(target_grad)
+
+        # Get reconstructed gradient from sensitivities
+        grad_dc = dc.reconstruct_gradient()
+
+        cache._remove_hooks()
+        unpatch_model(model_dc)
+
+        # =====================================================================
+        # Compute layer-wise errors
+        # =====================================================================
+        result.layer_results = cache.compute_errors(
+            fwd_abs_tol, fwd_rel_tol, bwd_abs_tol, bwd_rel_tol,
+            output_orig=orig_out.detach(), output_dc=dc_out.detach(),
+            sens_grad=grad_dc, orig_grad=grad_orig
+        )
+
+        # =====================================================================
+        # Compute overall errors
+        # =====================================================================
+
+        # Forward: compare final output
+        fwd_diff = (orig_out.detach() - dc_out.detach()).abs()
+        result.fwd_abs_error = fwd_diff.max().item()
+        result.fwd_rel_error = result.fwd_abs_error / (orig_out.abs().max().item() + 1e-10)
+
+        for lr in result.layer_results:
+            if lr.fwd_abs_error > result.fwd_abs_error:
+                result.fwd_abs_error = lr.fwd_abs_error
+            if lr.fwd_rel_error > result.fwd_rel_error:
+                result.fwd_rel_error = lr.fwd_rel_error
+
+        result.fwd_pass = check_pass(
+            result.fwd_abs_error, result.fwd_rel_error,
+            fwd_abs_tol, fwd_rel_tol
+        )
+
+        # Backward: compare reconstructed gradient
+        bwd_diff = (grad_orig - grad_dc).abs()
+        result.bwd_abs_error = bwd_diff.max().item()
+        result.bwd_rel_error = result.bwd_abs_error / (grad_orig.abs().max().item() + 1e-10)
+
+        for lr in result.layer_results:
+            if lr.bwd_abs_error > result.bwd_abs_error:
+                result.bwd_abs_error = lr.bwd_abs_error
+            if lr.bwd_rel_error > result.bwd_rel_error:
+                result.bwd_rel_error = lr.bwd_rel_error
+
+        result.bwd_pass = check_pass(
+            result.bwd_abs_error, result.bwd_rel_error,
+            bwd_abs_tol, bwd_rel_tol
+        )
+
+        result.success = result.fwd_pass and result.bwd_pass
+
+    except Exception as e:
+        import traceback
+        result.error_message = f"{e}\n{traceback.format_exc()}"
+        result.success = False
+
+    return result
+
+
+def test_model(
+    model: nn.Module,
+    x: Tensor,
+    name: str = "model",
+    fwd_abs_tol: float = DEFAULT_FWD_ABS_TOL,
+    fwd_rel_tol: float = DEFAULT_FWD_REL_TOL,
+    bwd_abs_tol: float = DEFAULT_BWD_ABS_TOL,
+    bwd_rel_tol: float = DEFAULT_BWD_REL_TOL,
+    api: str = "both",
+) -> Union[TestResult, Tuple[TestResult, TestResult]]:
+    """
+    Test a model's DC decomposition.
+
+    Args:
+        api: "functional", "context_manager", or "both" (default)
+    """
+    if api == "functional":
+        return test_model_functional(model, x, name, fwd_abs_tol, fwd_rel_tol, bwd_abs_tol, bwd_rel_tol)
+    elif api == "context_manager":
+        return test_model_context_manager(model, x, name, fwd_abs_tol, fwd_rel_tol, bwd_abs_tol, bwd_rel_tol)
+    else:  # both
+        r1 = test_model_functional(model, x, f"{name} [functional]", fwd_abs_tol, fwd_rel_tol, bwd_abs_tol, bwd_rel_tol)
+        r2 = test_model_context_manager(model, x, f"{name} [context_mgr]", fwd_abs_tol, fwd_rel_tol, bwd_abs_tol, bwd_rel_tol)
+        return r1, r2
 
 
 # =============================================================================
@@ -405,6 +554,7 @@ def run_model_tests(
     seed: int = 42,
     verbose: bool = True,
     show_layers: bool = True,
+    test_both_apis: bool = True,
 ) -> bool:
     """
     Run DC decomposition tests on multiple models.
@@ -413,6 +563,7 @@ def run_model_tests(
         models: Dict mapping name -> (model_or_factory, input_tensor_or_shape)
         title: Title for test output
         show_layers: Whether to show layer-wise errors
+        test_both_apis: Whether to test both functional and context manager APIs
     """
     torch.manual_seed(seed)
 
@@ -422,9 +573,11 @@ def run_model_tests(
         print("=" * 90)
         print(f"Tolerances: fwd_abs={fwd_abs_tol:.0e}, fwd_rel={fwd_rel_tol:.0e}, "
               f"bwd_abs={bwd_abs_tol:.0e}, bwd_rel={bwd_rel_tol:.0e}")
+        if test_both_apis:
+            print("Testing both APIs: functional and context_manager")
         print()
 
-    results: Dict[str, TestResult] = {}
+    results: List[TestResult] = []
 
     for name, (model_spec, input_spec) in models.items():
         # Get model instance
@@ -439,24 +592,38 @@ def run_model_tests(
         else:
             x = torch.randn(*input_spec)
 
-        # Run test
-        result = test_model(
-            model, x, name,
-            fwd_abs_tol=fwd_abs_tol,
-            fwd_rel_tol=fwd_rel_tol,
-            bwd_abs_tol=bwd_abs_tol,
-            bwd_rel_tol=bwd_rel_tol,
-        )
-        results[name] = result
-
-        if verbose:
-            _print_result(result, show_layers=show_layers)
+        # Run test(s)
+        if test_both_apis:
+            r1, r2 = test_model(
+                model, x, name,
+                fwd_abs_tol=fwd_abs_tol,
+                fwd_rel_tol=fwd_rel_tol,
+                bwd_abs_tol=bwd_abs_tol,
+                bwd_rel_tol=bwd_rel_tol,
+                api="both",
+            )
+            results.extend([r1, r2])
+            if verbose:
+                _print_result(r1, show_layers=show_layers)
+                _print_result(r2, show_layers=show_layers)
+        else:
+            result = test_model(
+                model, x, name,
+                fwd_abs_tol=fwd_abs_tol,
+                fwd_rel_tol=fwd_rel_tol,
+                bwd_abs_tol=bwd_abs_tol,
+                bwd_rel_tol=bwd_rel_tol,
+                api="functional",
+            )
+            results.append(result)
+            if verbose:
+                _print_result(result, show_layers=show_layers)
 
     # Print summary
     if verbose:
         _print_summary(results)
 
-    return all(r.success for r in results.values())
+    return all(r.success for r in results)
 
 
 def _print_result(result: TestResult, show_layers: bool = True) -> None:
@@ -490,33 +657,33 @@ def _print_result(result: TestResult, show_layers: bool = True) -> None:
             fwd_mark = "" if lr.fwd_pass else "*"
             bwd_mark = "" if lr.bwd_pass else "*"
             print(f"  {layer_name:<35} {lr.module_type:<15} "
-                  f"{lr.fwd_abs_error:<10.2e} {lr.fwd_rel_error:<10.2e} "
-                  f"{lr.bwd_abs_error:<10.2e}{bwd_mark} {lr.bwd_rel_error:<10.2e}{bwd_mark}")
+                  f"{lr.fwd_abs_error:<10.2e}{fwd_mark} {lr.fwd_rel_error:<10.2e} "
+                  f"{lr.bwd_abs_error:<10.2e}{bwd_mark} {lr.bwd_rel_error:<10.2e}")
 
     print()
 
 
-def _print_summary(results: Dict[str, TestResult]) -> None:
+def _print_summary(results: List[TestResult]) -> None:
     """Print test summary."""
     print("=" * 90)
     print("SUMMARY")
     print("=" * 90)
 
-    print(f"{'Model':<30} {'Fwd Abs':<12} {'Fwd Rel':<12} {'Bwd Abs':<12} {'Bwd Rel':<12} {'Status'}")
+    print(f"{'Model':<40} {'Fwd Abs':<12} {'Fwd Rel':<12} {'Bwd Abs':<12} {'Bwd Rel':<12} {'Status'}")
     print("-" * 90)
 
-    for name, r in results.items():
-        display_name = name[:28] + '..' if len(name) > 30 else name
+    for r in results:
+        display_name = r.name[:38] + '..' if len(r.name) > 40 else r.name
         if r.error_message:
-            print(f"{display_name:<30} {'ERROR':<12} {'':<12} {'':<12} {'':<12} FAIL")
+            print(f"{display_name:<40} {'ERROR':<12} {'':<12} {'':<12} {'':<12} FAIL")
         else:
             status = "PASS" if r.success else "FAIL"
-            print(f"{display_name:<30} {r.fwd_abs_error:<12.2e} {r.fwd_rel_error:<12.2e} "
+            print(f"{display_name:<40} {r.fwd_abs_error:<12.2e} {r.fwd_rel_error:<12.2e} "
                   f"{r.bwd_abs_error:<12.2e} {r.bwd_rel_error:<12.2e} {status}")
 
     print("-" * 90)
 
-    passed = sum(1 for r in results.values() if r.success)
+    passed = sum(1 for r in results if r.success)
     total = len(results)
 
     if passed == total:
@@ -532,7 +699,7 @@ def _print_summary(results: Dict[str, TestResult]) -> None:
 def test_model_simple(model: nn.Module, x: Tensor, name: str = "model",
                       fwd_tol: float = 1e-5, bwd_tol: float = 0.1) -> Dict:
     """Simple test interface for backward compatibility."""
-    result = test_model(
+    result = test_model_functional(
         model, x, name,
         fwd_abs_tol=fwd_tol, fwd_rel_tol=fwd_tol,
         bwd_abs_tol=bwd_tol, bwd_rel_tol=bwd_tol,

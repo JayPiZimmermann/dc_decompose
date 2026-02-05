@@ -11,42 +11,12 @@ detects `+` or `torch.add` operations, then patched by patch_model().
 import torch
 import torch.nn as nn
 from torch import Tensor
-from typing import Tuple
 
 from .base import (
-    init_backward, recenter_forward, make_grad_4,
+    recenter_dc,
     DC_ENABLED, DC_ORIGINAL_FORWARD, DC_IS_OUTPUT_LAYER, DC_BETA
 )
 
-
-class DCAddFunction(torch.autograd.Function):
-    """
-    Addition with automatic re-centering for DC format.
-
-    Forward: adds two [4*batch] tensors and re-centers the result.
-    Backward: distributes gradients to both inputs.
-    """
-
-    @staticmethod
-    def forward(ctx, x_4: Tensor, y_4: Tensor, recenter: bool,
-                is_output_layer: bool, beta: float) -> Tensor:
-        result = x_4 + y_4
-
-        if recenter:
-            result = recenter_forward(result)
-
-        ctx.is_output_layer = is_output_layer
-        ctx.beta = beta
-        return result
-
-    @staticmethod
-    def backward(ctx, grad_4: Tensor) -> Tuple[Tensor, Tensor, None, None, None]:
-        delta_pp, delta_np, delta_pn, delta_nn = init_backward(
-            grad_4, ctx.is_output_layer, ctx.beta)
-
-        # Addition distributes gradients to both inputs unchanged.
-        out_grad = make_grad_4(delta_pp, delta_np, delta_pn, delta_nn)
-        return out_grad, out_grad, None, None, None
 
 class Add(nn.Module):
     """
@@ -70,12 +40,15 @@ class Add(nn.Module):
 
 
 def dc_forward_add(module: Add, x: Tensor, y: Tensor) -> Tensor:
-    """DC-aware forward for Add module."""
-    return DCAddFunction.apply(
-        x, y, module.recenter,
-        getattr(module, DC_IS_OUTPUT_LAYER, False),
-        getattr(module, DC_BETA, 1.0)
-    )
+    """DC-aware forward for Add module.
+
+    Simply adds the two tensors and optionally re-centers.
+    The recenter_dc function handles gradient flow correctly.
+    """
+    result = x + y
+    if module.recenter:
+        result = recenter_dc(result)
+    return result
 
 
 def patch_add(module: Add) -> None:
@@ -113,4 +86,7 @@ unpatch_dcadd = unpatch_add
 
 def dc_add(x: Tensor, y: Tensor, recenter: bool = True) -> Tensor:
     """Functional version of DC addition with re-centering."""
-    return DCAddFunction.apply(x, y, recenter)
+    result = x + y
+    if recenter:
+        result = recenter_dc(result)
+    return result

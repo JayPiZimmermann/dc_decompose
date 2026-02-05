@@ -224,58 +224,40 @@ def init_pos_neg(x: Tensor, mode: InputMode = InputMode.CENTER) -> Tuple[Tensor,
     raise ValueError(f"Unknown mode: {mode}")
 
 
-class InitCattedFunction(torch.autograd.Function):
-    """
-    Custom autograd function for init_catted.
-
-    Forward: x -> [pos; neg; pos; neg] where pos = relu(x), neg = relu(-x)
-             The DC format creation is detached - no gradient flows through relu.
-    Backward: Pass gradients through unchanged. The DC layers handle gradient
-              transformation via their own 4-sensitivity logic.
-    """
-
-    @staticmethod
-    def forward(ctx, x: Tensor, mode_value: int) -> Tensor:
-        # mode_value: 0=CENTER, 1=POSITIVE, 2=NEGATIVE
-        # Create DC format with detached operations
-        with torch.no_grad():
-            if mode_value == 0:  # CENTER
-                pos = torch.relu(x)
-                neg = torch.relu(-x)
-            elif mode_value == 1:  # POSITIVE
-                pos = x.clone()
-                neg = torch.zeros_like(x)
-            else:  # NEGATIVE
-                pos = torch.zeros_like(x)
-                neg = -x
-
-        # Create output that requires grad if input does
-        result = torch.cat([pos, neg, pos, neg], dim=0)
-        return result
-
-    @staticmethod
-    def backward(ctx, grad_4: Tensor) -> Tuple[Tensor, None]:
-        # Pass gradient through unchanged - reconstruct from 4-sensitivity format
-        # grad_4 is [4*batch] = [delta_pp; delta_np; delta_pn; delta_nn]
-        q = grad_4.shape[0] // 4
-        delta_pp = grad_4[:q]
-        delta_np = grad_4[q:2*q]
-        delta_pn = grad_4[2*q:3*q]
-        delta_nn = grad_4[3*q:]
-
-        # Reconstruct gradient: this is the standard DC gradient reconstruction
-        # grad_x = d(loss)/d(pos) - d(loss)/d(neg)
-        # where d(loss)/d(pos) comes from pp path and d(loss)/d(neg) from nn path
-        grad_x = delta_pp - delta_np - delta_pn + delta_nn
-
-        return grad_x, None
-
-
 def init_catted(x: Tensor, mode: InputMode = InputMode.CENTER) -> Tensor:
-    """Initialize [4*batch] input for DC forward: [pos; neg; pos; neg]."""
-    # Convert mode to int for autograd function
-    mode_value = 0 if mode == InputMode.CENTER else (1 if mode == InputMode.POSITIVE else 2)
-    result = InitCattedFunction.apply(x, mode_value)
+    """
+    Initialize [4*batch] input for DC forward: [pos; neg; pos; neg].
+
+    This is a PREPROCESSING step that is DETACHED from autograd.
+    The returned tensor has requires_grad=True so that backward pass
+    accumulates the 4 sensitivities in its .grad attribute.
+
+    Args:
+        x: Input tensor of shape [batch, ...]
+        mode: How to split x into pos/neg streams
+            - CENTER: pos = relu(x), neg = relu(-x)  [default]
+            - POSITIVE: pos = x, neg = 0
+            - NEGATIVE: pos = 0, neg = -x
+
+    Returns:
+        Tensor of shape [4*batch, ...] with requires_grad=True.
+        After backward, .grad contains [delta_pp; delta_np; delta_pn; delta_nn].
+    """
+    with torch.no_grad():
+        if mode == InputMode.CENTER:
+            pos = torch.relu(x)
+            neg = torch.relu(-x)
+        elif mode == InputMode.POSITIVE:
+            pos = x.clone()
+            neg = torch.zeros_like(x)
+        else:  # NEGATIVE
+            pos = torch.zeros_like(x)
+            neg = -x
+
+        result = torch.cat([pos, neg, pos, neg], dim=0)
+
+    # Enable gradient tracking on the result (detached from x)
+    result.requires_grad_(True)
 
     # Log initialization
     try:
@@ -299,12 +281,53 @@ def init_catted(x: Tensor, mode: InputMode = InputMode.CENTER) -> Tensor:
 # Output reconstruction
 # =============================================================================
 
-def reconstruct_output(output_4: Tensor) -> Tensor:
-    """Reconstruct original output from [4*batch]: out_pos - out_neg."""
-    q = output_4.shape[0] // 4
-    out_pos = output_4[:q]
-    out_neg = output_4[q:2*q]
-    result = out_pos - out_neg
+class ReconstructOutputFunction(torch.autograd.Function):
+    """
+    Reconstruct output from DC format and initialize sensitivities.
+
+    Forward: [pos; neg; pos; neg] -> pos - neg
+    Backward: Initializes 4-sensitivities with beta weighting:
+        - delta_pp = beta * g
+        - delta_np = 0
+        - delta_pn = (1-beta) * (-g)  [since d(pos-neg)/d(neg) = -1]
+        - delta_nn = 0
+
+    With beta=1 (default): [g, 0, -0, 0] = [g, 0, 0, 0]
+    Reconstruction check: delta_pp - delta_np - delta_pn + delta_nn
+                        = beta*g - 0 - (-(1-beta)*g) + 0
+                        = beta*g + (1-beta)*g = g ✓
+    """
+
+    @staticmethod
+    def forward(ctx, output_4: Tensor, beta: float) -> Tensor:
+        q = output_4.shape[0] // 4
+        out_pos = output_4[:q]
+        out_neg = output_4[q:2*q]
+        ctx.beta = beta
+        return out_pos - out_neg
+
+    @staticmethod
+    def backward(ctx, grad: Tensor) -> Tuple[Tensor, None]:
+        beta = ctx.beta
+        zeros = torch.zeros_like(grad)
+        # Initialize sensitivities:
+        # delta_pp = beta * g, delta_np = 0, delta_pn = -(1-beta)*g, delta_nn = 0
+        delta_pp = beta * grad
+        delta_np = zeros
+        delta_pn = -(1 - beta) * grad
+        delta_nn = zeros
+        return torch.cat([delta_pp, delta_np, delta_pn, delta_nn], dim=0), None
+
+
+def reconstruct_output(output_4: Tensor, beta: float = 1.0) -> Tensor:
+    """Reconstruct original output from [4*batch]: out_pos - out_neg.
+
+    Args:
+        output_4: DC format tensor [pos; neg; pos; neg]
+        beta: Sensitivity initialization weight (default 1.0).
+              Backward pass initializes: delta_pp = beta*g, delta_pn = -(1-beta)*g
+    """
+    result = ReconstructOutputFunction.apply(output_4, beta)
 
     # Log reconstruction
     try:
@@ -315,6 +338,8 @@ def reconstruct_output(output_4: Tensor) -> Tensor:
             log.info(f"reconstruct: {list(output_4.shape)} -> {list(result.shape)}")
         tensor_log = get_logger('dc.tensors')
         if tensor_log.isEnabledFor(TENSOR_LEVEL):
+            q = output_4.shape[0] // 4
+            out_pos, out_neg = output_4[:q], output_4[q:2*q]
             tensor_log.log(TENSOR_LEVEL, f"reconstruct: pos_mean={out_pos.mean().item():.4f}, neg_mean={out_neg.mean().item():.4f}, z_mean={result.mean().item():.4f}")
     except ImportError:
         pass
@@ -331,7 +356,10 @@ class DCRecenterFunction(torch.autograd.Function):
     Re-center DC representation with proper gradient flow.
 
     Forward: new_pos = relu(z), new_neg = relu(-z) where z = pos - neg
-    Backward: Properly propagate 4-sensitivities through the relu operations.
+    Backward: Pass gradients through unchanged.
+
+    The recenter operation preserves z = pos - neg (since new_pos - new_neg = z),
+    so for gradient purposes it acts as identity on the underlying value.
     """
 
     @staticmethod
@@ -344,111 +372,11 @@ class DCRecenterFunction(torch.autograd.Function):
         new_pos = torch.relu(z)
         new_neg = torch.relu(-z)
 
-        # Save mask for backward: where z > 0, gradient flows through new_pos
-        # where z < 0, gradient flows through new_neg
-        ctx.save_for_backward((z > 0).float(), (z < 0).float())
-
         return make_input_4(new_pos, new_neg)
 
     @staticmethod
     def backward(ctx, grad_4: Tensor) -> Tensor:
-        mask_pos, mask_neg = ctx.saved_tensors
-
-        # Split incoming gradients
-        delta_pp, delta_np, delta_pn, delta_nn = split_grad_4(grad_4)
-
-        # Gradient through recenter:
-        # new_pos = relu(z) = relu(pos - neg)
-        # new_neg = relu(-z) = relu(neg - pos)
-        #
-        # d(new_pos)/d(pos) = relu'(z) = mask_pos
-        # d(new_pos)/d(neg) = -relu'(z) = -mask_pos
-        # d(new_neg)/d(pos) = -relu'(-z) = -mask_neg
-        # d(new_neg)/d(neg) = relu'(-z) = mask_neg
-        #
-        # In 4-sensitivity format:
-        # delta_pp flows to: pos (new_pos path) -> delta_pp * mask_pos
-        # delta_np flows to: neg (new_pos path) -> delta_np * (-mask_pos) -> goes to input neg
-        # etc.
-
-        # Gradient w.r.t. pos (from both new_pos and new_neg paths)
-        grad_pos_from_new_pos = delta_pp * mask_pos  # d(new_pos)/d(pos) * delta_pp
-        grad_pos_from_new_neg = -delta_np * mask_neg  # d(new_neg)/d(pos) * delta_np
-
-        # Gradient w.r.t. neg (from both new_pos and new_neg paths)
-        grad_neg_from_new_pos = -delta_pp * mask_pos  # d(new_pos)/d(neg) * delta_pp
-        grad_neg_from_new_neg = delta_np * mask_neg   # d(new_neg)/d(neg) * delta_np
-
-        # Same for pn/nn sensitivities
-        grad_pos_from_new_pos_pn = delta_pn * mask_pos
-        grad_pos_from_new_neg_pn = -delta_nn * mask_neg
-        grad_neg_from_new_pos_pn = -delta_pn * mask_pos
-        grad_neg_from_new_neg_pn = delta_nn * mask_neg
-
-        # Combine into new 4-sensitivities for input
-        # The pp sensitivity for input pos comes from pp flowing through new_pos
-        new_pp = grad_pos_from_new_pos
-        # The np sensitivity for input neg comes from pp flowing through new_neg (sign matters)
-        new_np = -grad_neg_from_new_pos  # Flip sign for neg input
-
-        new_pn = grad_pos_from_new_pos_pn
-        new_nn = -grad_neg_from_new_pos_pn
-
-        # Actually, let me think about this more carefully.
-        # The 4-sensitivities are:
-        # delta_pp: dL/d(out_pos) for the "positive" sensitivity path
-        # delta_np: dL/d(out_pos) that came through the neg input path
-        # etc.
-
-        # For recenter, the output (new_pos, new_neg) depends on input (pos, neg) through z = pos - neg.
-        # The chain rule gives us:
-        # dL/d(pos) = dL/d(new_pos) * d(new_pos)/d(pos) + dL/d(new_neg) * d(new_neg)/d(pos)
-        #           = delta_pp * mask_pos + delta_np * (-mask_neg)
-        # dL/d(neg) = dL/d(new_pos) * d(new_pos)/d(neg) + dL/d(new_neg) * d(new_neg)/d(neg)
-        #           = delta_pp * (-mask_pos) + delta_np * mask_neg
-
-        # In standard DC backward, the 4 sensitivities propagate independently.
-        # Here we need to mix them based on the recenter operation.
-
-        # Simpler approach: since recenter just applies relu to z = pos - neg,
-        # the gradient flow is determined by where z > 0 or z < 0.
-        # Where z > 0: new_pos = z, new_neg = 0, so gradient flows through new_pos only
-        # Where z < 0: new_pos = 0, new_neg = -z, so gradient flows through new_neg only
-
-        # For the DC 4-sensitivity format, we need to propagate each sensitivity
-        # through the appropriate path.
-
-        # When z > 0 (mask_pos = 1, mask_neg = 0):
-        #   new_pos = z = pos - neg, new_neg = 0
-        #   dL/d(pos) = dL/d(new_pos) = delta_pp (for pp path)
-        #   dL/d(neg) = -dL/d(new_pos) = -delta_pp
-        #   But wait, neg doesn't contribute to new_neg when z > 0, so delta_np doesn't flow.
-
-        # This is getting complicated. Let me just use a simpler formulation:
-        # The recenter operation is: new_pos = relu(pos - neg), new_neg = relu(neg - pos)
-        # This is equivalent to two separate relu operations.
-
-        # For standard gradient reconstruction:
-        # grad_z = delta_pp * mask_pos - delta_np * mask_neg  (contribution to z from both outputs)
-
-        # Actually, let me use the simplest correct approach:
-        # Compute grad_z = grad_new_pos * relu'(z) + grad_new_neg * relu'(-z) * (-1)
-        #                = delta_pp * mask_pos - delta_np * mask_neg
-        # Then: grad_pos = grad_z, grad_neg = -grad_z
-
-        grad_z_pp = delta_pp * mask_pos - delta_np * mask_neg
-        grad_z_pn = delta_pn * mask_pos - delta_nn * mask_neg
-
-        # For input sensitivities:
-        # new_pp corresponds to grad on pos from pp path
-        # new_np corresponds to grad on neg from pp path (but neg contributes -z)
-        input_pp = grad_z_pp  # grad w.r.t. pos
-        input_np = torch.zeros_like(grad_z_pp)  # pp doesn't flow to neg's positive sensitivity
-        input_pn = grad_z_pn
-        input_nn = torch.zeros_like(grad_z_pn)
-
-        # Hmm, this still doesn't feel right. Let me just pass through unchanged for now
-        # and rely on Add's recenter which works.
+        # Pass gradient through unchanged - recenter preserves z = pos - neg
         return grad_4
 
 
@@ -466,6 +394,150 @@ def recenter_dc(tensor_4: Tensor) -> Tensor:
     Use this after residual additions to prevent exponential magnitude growth.
     """
     return DCRecenterFunction.apply(tensor_4)
+
+
+# =============================================================================
+# Sensitivity extraction utilities
+# =============================================================================
+
+@dataclass
+class Sensitivities:
+    """Container for the 4 DC sensitivities."""
+    delta_pp: Tensor
+    delta_np: Tensor
+    delta_pn: Tensor
+    delta_nn: Tensor
+
+    def reconstruct_gradient(self) -> Tensor:
+        """Reconstruct the standard gradient: pp - np - pn + nn."""
+        return self.delta_pp - self.delta_np - self.delta_pn + self.delta_nn
+
+    def pos_gradient(self) -> Tensor:
+        """Gradient w.r.t. positive stream: pp - np."""
+        return self.delta_pp - self.delta_np
+
+    def neg_gradient(self) -> Tensor:
+        """Gradient w.r.t. negative stream: pn - nn."""
+        return self.delta_pn - self.delta_nn
+
+
+def extract_sensitivities(grad_4: Tensor) -> Sensitivities:
+    """Extract 4 sensitivities from [4*batch] gradient tensor."""
+    delta_pp, delta_np, delta_pn, delta_nn = split4(grad_4)
+    return Sensitivities(delta_pp, delta_np, delta_pn, delta_nn)
+
+
+# =============================================================================
+# Context Manager API (convenient usage)
+# =============================================================================
+
+class DCForward:
+    """
+    Context manager for convenient DC decomposition forward/backward.
+
+    Usage:
+        with DCForward(model, x, beta=1.0) as dc:
+            out = dc.output
+            loss = criterion(out, target)
+            loss.backward()
+
+        # After backward:
+        sens = dc.sensitivities  # Sensitivities object
+        grad = dc.reconstruct_gradient()  # Standard gradient
+    """
+
+    def __init__(
+        self,
+        model: 'torch.nn.Module',
+        x: Tensor,
+        mode: InputMode = InputMode.CENTER,
+        beta: float = 1.0,
+    ):
+        """
+        Args:
+            model: DC-patched model (use prepare_model_for_dc first)
+            x: Input tensor
+            mode: Input splitting mode (default: CENTER)
+            beta: Sensitivity initialization weight (default: 1.0)
+        """
+        self.model = model
+        self.x = x
+        self.mode = mode
+        self.beta = beta
+
+        self._x_cat: Optional[Tensor] = None
+        self._out_cat: Optional[Tensor] = None
+        self._output: Optional[Tensor] = None
+
+    def __enter__(self) -> 'DCForward':
+        # Create DC input (detached from x, with requires_grad=True)
+        self._x_cat = init_catted(self.x, self.mode)
+
+        # Forward pass
+        self._out_cat = self.model(self._x_cat)
+        self._output = reconstruct_output(self._out_cat, self.beta)
+
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        # Nothing to clean up
+        return False
+
+    @property
+    def output(self) -> Tensor:
+        """The reconstructed output (pos - neg)."""
+        if self._output is None:
+            raise RuntimeError("Must be used within context manager")
+        return self._output
+
+    @property
+    def output_4(self) -> Tensor:
+        """The raw [4*batch] output tensor."""
+        if self._out_cat is None:
+            raise RuntimeError("Must be used within context manager")
+        return self._out_cat
+
+    @property
+    def input_4(self) -> Tensor:
+        """The [4*batch] input tensor (for accessing .grad after backward)."""
+        if self._x_cat is None:
+            raise RuntimeError("Must be used within context manager")
+        return self._x_cat
+
+    @property
+    def sensitivities(self) -> Sensitivities:
+        """
+        Get the 4 sensitivities after backward.
+
+        Returns:
+            Sensitivities object with delta_pp, delta_np, delta_pn, delta_nn
+        """
+        if self._x_cat is None or self._x_cat.grad is None:
+            raise RuntimeError("Call backward() first")
+        return extract_sensitivities(self._x_cat.grad)
+
+    def reconstruct_gradient(self) -> Tensor:
+        """Reconstruct standard gradient from sensitivities: pp - np - pn + nn."""
+        return self.sensitivities.reconstruct_gradient()
+
+
+def dc_forward(
+    model: 'torch.nn.Module',
+    x: Tensor,
+    mode: InputMode = InputMode.CENTER,
+    beta: float = 1.0,
+) -> DCForward:
+    """
+    Create a DCForward context manager.
+
+    Usage:
+        with dc_forward(model, x) as dc:
+            out = dc.output
+            loss.backward()
+
+        grad = dc.reconstruct_gradient()
+    """
+    return DCForward(model, x, mode, beta)
 
 
 # =============================================================================
