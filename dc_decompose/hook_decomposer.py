@@ -70,8 +70,26 @@ class DCCache:
             setattr(self, attr, None)
 
 
-# Import ReLU helpers from operations module
+# Import helpers from operations module
 from .operations.relu import forward_relu, backward_relu
+from .operations.add import Add
+
+
+def _recenter_stacked(stacked: Tensor) -> Tensor:
+    """
+    Re-center stacked DC representation [2, batch, ...] to minimize magnitudes.
+
+    Given stacked[0] = pos, stacked[1] = neg where z = pos - neg:
+    - Computes new_pos = ReLU(z), new_neg = ReLU(-z)
+    - Returns stacked [new_pos, new_neg]
+
+    This preserves z = new_pos - new_neg but ensures minimal magnitudes.
+    """
+    pos, neg = stacked[0], stacked[1]
+    z = pos - neg
+    new_pos = torch.relu(z)
+    new_neg = torch.relu(-z)
+    return torch.stack([new_pos, new_neg], dim=0)
 
 # Attribute names stored on original modules
 DC_INPUT_MODE = '_dc_input_mode'
@@ -131,6 +149,7 @@ class HookDecomposer:
         relu_backprop_mode: str = 'standard',
         cache_activations: bool = True,
         target_layers: Optional[List[str]] = None,
+        auto_convert_functional: bool = True,
     ):
         """
         Initialize HookDecomposer.
@@ -152,7 +171,14 @@ class HookDecomposer:
             relu_backprop_mode: ReLU backprop mode ('standard', 'mask_diff', 'sum')
             cache_activations: Whether to cache activations (required for backward)
             target_layers: Optional list of layer names to decompose (None = all)
+            auto_convert_functional: If True, automatically convert functional operations
+                (torch.relu, +, torch.softmax, etc.) to module equivalents (default True)
         """
+        # Auto-convert functional operations to modules if requested
+        if auto_convert_functional:
+            from .operations.functional_replacer import make_dc_compatible
+            model = make_dc_compatible(model)
+
         self.model = model
         self.input_mode = input_mode
         self.beta = beta
@@ -165,7 +191,8 @@ class HookDecomposer:
 
         # Layer caches and ordering
         self.caches: Dict[str, DCCache] = {}
-        self.layer_order: List[str] = []
+        self.layer_order: List[str] = []  # Module tree order (for module registration)
+        self.execution_order: List[str] = []  # Actual execution order (populated during forward)
         self.modules: Dict[str, nn.Module] = {}
 
         # Stacked tensor cache: maps original tensor data_ptr to stacked version
@@ -204,7 +231,7 @@ class HookDecomposer:
         return isinstance(module, (
             nn.Linear, nn.Conv2d, nn.ReLU, nn.Softmax,
             nn.BatchNorm1d, nn.BatchNorm2d, nn.LayerNorm, nn.MaxPool2d, nn.AvgPool2d,
-            nn.Flatten, nn.AdaptiveAvgPool2d, nn.Dropout, nn.Identity,
+            nn.Flatten, nn.AdaptiveAvgPool2d, nn.Dropout, nn.Identity, Add,
         ))
 
     def _register_hooks(self):
@@ -366,6 +393,10 @@ class HookDecomposer:
                 stacked_output = self._forward_layernorm_stacked(
                     module, cache, stacked_input, should_cache
                 )
+
+            elif isinstance(module, Add):
+                # Add module has two inputs - get stacked versions of both
+                stacked_output = self._forward_add_stacked(module, inputs, stacked_input)
 
             elif hasattr(module, '_dc_is_matmul') and module._dc_is_matmul:
                 stacked_output = self._forward_dc_matmul_stacked(
@@ -921,6 +952,55 @@ class HookDecomposer:
         output_pos = F.adaptive_avg_pool2d(input_pos, module.output_size)
         output_neg = F.adaptive_avg_pool2d(input_neg, module.output_size)
         return torch.stack([output_pos, output_neg], dim=0)
+
+    def _forward_add_stacked(self, module: Add, inputs: Tuple[Tensor, ...], stacked_x: Tensor) -> Tensor:
+        """DC forward for Add module using stacked tensors with re-centering."""
+        # Add module has two inputs: x and y
+        # stacked_x is the stacked version of x (first input)
+        # We need to get or create stacked version of y (second input)
+
+        if len(inputs) < 2:
+            # Fallback: if only one input, return it unchanged
+            return stacked_x
+
+        y = inputs[1]
+        y_ptr = y.data_ptr()
+
+        # Get or create stacked version of y
+        if y_ptr in self._stacked_cache:
+            stacked_y = self._stacked_cache[y_ptr]
+        else:
+            # Initialize y using CENTER mode (same as input initialization)
+            input_mode = getattr(module, DC_INPUT_MODE, InputMode.CENTER)
+            beta = getattr(module, DC_BETA, 1.0)
+
+            if input_mode == InputMode.CENTER:
+                y_pos = F.relu(y)
+                y_neg = F.relu(-y)
+            elif input_mode == InputMode.POSITIVE:
+                y_pos = y
+                y_neg = torch.zeros_like(y)
+            elif input_mode == InputMode.NEGATIVE:
+                y_pos = torch.zeros_like(y)
+                y_neg = -y
+            elif input_mode == InputMode.BETA:
+                y_pos = beta * y
+                y_neg = -(1 - beta) * y
+            else:
+                y_pos = F.relu(y)
+                y_neg = F.relu(-y)
+
+            stacked_y = torch.stack([y_pos, y_neg], dim=0)
+            self._stacked_cache[y_ptr] = stacked_y
+
+        # Add the two stacked tensors
+        stacked_sum = stacked_x + stacked_y
+
+        # Apply re-centering if enabled (prevents magnitude explosion)
+        if getattr(module, 'recenter', True):
+            stacked_sum = _recenter_stacked(stacked_sum)
+
+        return stacked_sum
 
     def _forward_softmax_stacked(
         self, module: nn.Softmax, cache: DCCache,
@@ -1615,6 +1695,26 @@ class HookDecomposer:
                 error = (reconstructed - cache.original_output).abs().max().item()
                 errors[name] = error
         return errors
+
+    def find_output_layer_name(self) -> Optional[str]:
+        """
+        Find the actual output layer name (typically a Linear or Conv layer).
+
+        Skips _dc_* modules added by functional_replacer since those are
+        auxiliary modules (like ReLU replacements), not the actual output.
+
+        Returns:
+            Name of the output layer, or None if not found.
+        """
+        output_name = None
+        for name in self.layer_order:
+            # Skip _dc_* modules added by functional_replacer
+            if name.startswith('_dc_') or '._dc_' in name:
+                continue
+            module = self.modules.get(name)
+            if module is not None and isinstance(module, (nn.Linear, nn.Conv2d, nn.Conv1d)):
+                output_name = name
+        return output_name
 
     # =========================================================================
     # Cleanup

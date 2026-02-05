@@ -4,182 +4,123 @@ Test basic layer functionality - Linear, Conv, ReLU, BatchNorm, etc.
 
 import sys
 import os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import torch
 import torch.nn as nn
-from typing import Dict, Tuple
-from dc_decompose import HookDecomposer, InputMode, BackwardMode, ReLUMode
+from utils import run_model_tests
 
 
-def test_model(model: nn.Module, input_tensor: torch.Tensor, model_name: str) -> Dict:
-    """Test a single model."""
-    print(f"Testing {model_name}...")
-    
-    try:
-        model.eval()
-        
-        # Create decomposer
-        decomposer = HookDecomposer(model)
-        decomposer.set_input_mode(InputMode.CENTER)
-        decomposer.set_backward_mode(BackwardMode.ALPHA)
-        decomposer.set_alpha(0.35)
-        decomposer.initialize(input_tensor)
-        
-        # Forward pass
-        original_out = model(input_tensor)
-        
-        # Get final activations
-        final_layer = decomposer.layer_order[-1] if decomposer.layer_order else None
-        if not final_layer:
-            return {'success': False, 'error': 'No layers found'}
-        
-        activations = decomposer.get_activation(final_layer)
-        if not activations:
-            return {'success': False, 'error': 'No activations captured'}
-        
-        out_pos, out_neg = activations
-        reconstructed = out_pos - out_neg
-        reconstruction_error = torch.norm(original_out - reconstructed).item()
-        
-        # Test backward pass
-        decomposer.backward()
-        
-        # Check stacked gradients
-        stacked_grads = decomposer.get_stacked_gradients(decomposer.layer_order[0])
-        gradient_shape = stacked_grads.shape if stacked_grads is not None else None
-        
-        # Test hook bypass
-        decomposer.disable_hooks()
-        output_no_hooks = model(input_tensor)
-        decomposer.enable_hooks()
-        hook_bypass_error = torch.norm(original_out - output_no_hooks).item()
-        
-        return {
-            'success': True,
-            'reconstruction_error': reconstruction_error,
-            'num_layers': len(decomposer.layer_order),
-            'gradient_shape': gradient_shape,
-            'hook_bypass_error': hook_bypass_error,
-            'layers': decomposer.layer_order
-        }
-        
-    except Exception as e:
-        return {'success': False, 'error': str(e)}
+# =============================================================================
+# Model Definitions
+# =============================================================================
+
+# Single layers
+def single_linear():
+    return nn.Linear(10, 5)
+
+def single_conv2d():
+    return nn.Conv2d(3, 16, 3)
+
+def single_relu():
+    return nn.ReLU()
+
+def single_batchnorm1d():
+    model = nn.BatchNorm1d(10)
+    model.eval()
+    return model
+
+def single_batchnorm2d():
+    model = nn.BatchNorm2d(8)
+    model.eval()
+    return model
+
+# Pooling layers
+def single_maxpool2d():
+    return nn.MaxPool2d(2)
+
+def single_avgpool2d():
+    return nn.AvgPool2d(2)
+
+def single_adaptive_avgpool2d():
+    return nn.AdaptiveAvgPool2d((4, 4))
+
+# Utility layers
+def single_flatten():
+    return nn.Flatten()
+
+def single_dropout():
+    model = nn.Dropout(0.5)
+    model.eval()  # Dropout is identity in eval mode
+    return model
+
+def single_identity():
+    return nn.Identity()
+
+# Simple chains
+def linear_chain():
+    return nn.Sequential(
+        nn.Linear(8, 16),
+        nn.ReLU(),
+        nn.Linear(16, 4)
+    )
+
+def conv_chain():
+    model = nn.Sequential(
+        nn.Conv2d(3, 16, 3, padding=1),
+        nn.BatchNorm2d(16),
+        nn.ReLU(),
+        nn.MaxPool2d(2),
+        nn.Conv2d(16, 32, 3, padding=1),
+        nn.AdaptiveAvgPool2d((1, 1)),
+        nn.Flatten(),
+        nn.Linear(32, 10)
+    )
+    model.eval()
+    return model
+
+def mixed_chain():
+    model = nn.Sequential(
+        nn.Linear(20, 50),
+        nn.BatchNorm1d(50),
+        nn.ReLU(),
+        nn.Dropout(0.3),
+        nn.Linear(50, 10),
+        nn.ReLU()
+    )
+    model.eval()
+    return model
 
 
-def get_basic_layer_models():
-    """Get basic layer test models."""
-    models = {}
-    
+# =============================================================================
+# Test Configuration
+# =============================================================================
+
+MODELS = {
     # Single layers
-    models['Linear'] = (nn.Linear(10, 5), torch.randn(3, 10))
-    models['Conv2d'] = (nn.Conv2d(3, 16, 3), torch.randn(2, 3, 8, 8))
-    models['ReLU'] = (nn.ReLU(), torch.randn(2, 10))
-    models['BatchNorm1d'] = (nn.BatchNorm1d(10), torch.randn(4, 10))
-    models['BatchNorm2d'] = (nn.BatchNorm2d(8), torch.randn(2, 8, 16, 16))
-    
+    'Linear': (single_linear, (3, 10)),
+    'Conv2d': (single_conv2d, (2, 3, 8, 8)),
+    'ReLU': (single_relu, (2, 10)),
+    'BatchNorm1d': (single_batchnorm1d, (4, 10)),
+    'BatchNorm2d': (single_batchnorm2d, (2, 8, 16, 16)),
+
     # Pooling layers
-    models['MaxPool2d'] = (nn.MaxPool2d(2), torch.randn(2, 4, 16, 16))
-    models['AvgPool2d'] = (nn.AvgPool2d(2), torch.randn(2, 4, 16, 16))
-    models['AdaptiveAvgPool2d'] = (nn.AdaptiveAvgPool2d((4, 4)), torch.randn(2, 8, 16, 16))
-    
+    'MaxPool2d': (single_maxpool2d, (2, 4, 16, 16)),
+    'AvgPool2d': (single_avgpool2d, (2, 4, 16, 16)),
+    'AdaptiveAvgPool2d': (single_adaptive_avgpool2d, (2, 8, 16, 16)),
+
     # Utility layers
-    models['Flatten'] = (nn.Flatten(), torch.randn(2, 4, 8, 8))
-    models['Dropout'] = (nn.Dropout(0.5), torch.randn(2, 10))
-    models['Identity'] = (nn.Identity(), torch.randn(2, 10))
-    
+    'Flatten': (single_flatten, (2, 4, 8, 8)),
+    'Dropout': (single_dropout, (2, 10)),
+    'Identity': (single_identity, (2, 10)),
+
     # Simple chains
-    models['LinearChain'] = (
-        nn.Sequential(
-            nn.Linear(8, 16),
-            nn.ReLU(),
-            nn.Linear(16, 4)
-        ),
-        torch.randn(2, 8)
-    )
-    
-    models['ConvChain'] = (
-        nn.Sequential(
-            nn.Conv2d(3, 16, 3, padding=1),
-            nn.BatchNorm2d(16),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-            nn.Conv2d(16, 32, 3, padding=1),
-            nn.AdaptiveAvgPool2d((1, 1)),
-            nn.Flatten(),
-            nn.Linear(32, 10)
-        ),
-        torch.randn(2, 3, 16, 16)
-    )
-    
-    models['MixedChain'] = (
-        nn.Sequential(
-            nn.Linear(20, 50),
-            nn.BatchNorm1d(50),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(50, 10),
-            nn.ReLU()
-        ),
-        torch.randn(4, 20)
-    )
-    
-    return models
-
-
-def run_basic_layer_tests():
-    """Run all basic layer tests."""
-    print("🧪 DC Decomposition - Basic Layer Tests")
-    print("=" * 50)
-    
-    models = get_basic_layer_models()
-    results = {}
-    
-    for name, (model, input_tensor) in models.items():
-        result = test_model(model, input_tensor, name)
-        results[name] = result
-        
-        if result['success']:
-            print(f"✅ {name}")
-            print(f"   Reconstruction error: {result['reconstruction_error']:.2e}")
-            print(f"   Hook bypass error: {result['hook_bypass_error']:.2e}")
-            print(f"   Layers: {result['num_layers']}")
-            if result['gradient_shape']:
-                print(f"   Gradient shape: {result['gradient_shape']}")
-        else:
-            print(f"❌ {name}: {result['error']}")
-        print()
-    
-    # Summary
-    successful = sum(1 for r in results.values() if r['success'])
-    total = len(results)
-    
-    print("=" * 50)
-    print(f"BASIC LAYER SUMMARY: {successful}/{total} tests passed ({100*successful/total:.1f}%)")
-    
-    if successful == total:
-        print("🎉 All basic layer tests passed!")
-        
-        # Show error statistics
-        recon_errors = [r['reconstruction_error'] for r in results.values() if r['success']]
-        if recon_errors:
-            print(f"Best reconstruction error: {min(recon_errors):.2e}")
-            print(f"Worst reconstruction error: {max(recon_errors):.2e}")
-            print(f"Mean reconstruction error: {sum(recon_errors)/len(recon_errors):.2e}")
-            
-        return True
-    else:
-        failed_models = [name for name, r in results.items() if not r['success']]
-        print(f"❌ Failed models: {failed_models}")
-        
-        # Show error details
-        for name in failed_models:
-            print(f"   {name}: {results[name]['error']}")
-        
-        return False
+    'LinearChain': (linear_chain, (2, 8)),
+    'ConvChain': (conv_chain, (2, 3, 16, 16)),
+    'MixedChain': (mixed_chain, (4, 20)),
+}
 
 
 if __name__ == "__main__":
-    success = run_basic_layer_tests()
+    success = run_model_tests(MODELS, title="Basic Layer Tests")
     sys.exit(0 if success else 1)

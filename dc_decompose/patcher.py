@@ -21,20 +21,19 @@ import torch.nn as nn
 from contextlib import contextmanager
 from typing import Optional, List
 
-from .base import DC_ENABLED, DC_ORIGINAL_FORWARD, DC_IS_OUTPUT_LAYER, DC_BETA
-from .linear import patch_linear, unpatch_linear
-from .conv2d import patch_conv2d, unpatch_conv2d
-from .conv1d import patch_conv1d, unpatch_conv1d
-from .conv_transpose import patch_conv_transpose1d, patch_conv_transpose2d, unpatch_conv_transpose1d, unpatch_conv_transpose2d
-from .relu import patch_relu, unpatch_relu
-from .batchnorm import patch_batchnorm, unpatch_batchnorm
-from .maxpool import patch_maxpool1d, patch_maxpool2d, unpatch_maxpool1d, unpatch_maxpool2d
-from .avgpool import (
+from .operations.base import DC_ENABLED, DC_ORIGINAL_FORWARD, DC_IS_OUTPUT_LAYER, DC_BETA
+from .operations.linear import patch_linear, unpatch_linear
+from .operations.conv import patch_conv2d, unpatch_conv2d, patch_conv1d, unpatch_conv1d
+from .operations.conv_transpose import patch_conv_transpose1d, patch_conv_transpose2d, unpatch_conv_transpose1d, unpatch_conv_transpose2d
+from .operations.relu import patch_relu, unpatch_relu
+from .operations.batchnorm import patch_batchnorm, unpatch_batchnorm
+from .operations.maxpool import patch_maxpool1d, patch_maxpool2d, unpatch_maxpool1d, unpatch_maxpool2d
+from .operations.avgpool import (
     patch_avgpool1d, patch_avgpool2d, unpatch_avgpool1d, unpatch_avgpool2d,
     patch_adaptive_avgpool1d, patch_adaptive_avgpool2d, unpatch_adaptive_avgpool1d, unpatch_adaptive_avgpool2d
 )
-from .add import Add, patch_add, unpatch_add
-from .shape_ops import (
+from .operations.add import Add, patch_add, unpatch_add
+from .operations.shape_ops import (
     patch_flatten, unpatch_flatten,
     patch_unflatten, unpatch_unflatten,
     Reshape, patch_reshape, unpatch_reshape,
@@ -45,12 +44,34 @@ from .shape_ops import (
     Permute, patch_permute, unpatch_permute,
     patch_dropout, unpatch_dropout
 )
+from .operations.layernorm import patch_layernorm, unpatch_layernorm
+from .operations.softmax import patch_softmax, unpatch_softmax
+
+
+# Forward declaration for Mul and Mean (defined in functional_replacer)
+Mul = None
+Mean = None
+
+
+def _lazy_import_mul_mean():
+    """Lazy import to avoid circular dependency."""
+    global Mul, Mean
+    if Mul is None:
+        from .functional_replacer import Mul as _Mul, Mean as _Mean
+        Mul = _Mul
+        Mean = _Mean
+
+
+def _get_mul_mean_patchers():
+    """Get patch/unpatch functions for Mul and Mean."""
+    from .functional_replacer import patch_mul, unpatch_mul, patch_mean, unpatch_mean
+    return patch_mul, unpatch_mul, patch_mean, unpatch_mean
 
 
 def patch_model(
     model: nn.Module,
     relu_mode: str = 'max',
-    backprop_mode: str = 'standard',
+    backprop_mode: str = 'sum',
     target_layers: Optional[List[str]] = None,
 ) -> None:
     """
@@ -60,11 +81,14 @@ def patch_model(
         model: The PyTorch model to patch
         relu_mode: ReLU decomposition mode ('max', 'min', 'half')
         backprop_mode: ReLU backprop mode ('standard', 'mask_diff', 'sum')
-            - 'standard': original DC sensitivity propagation (default)
-            - 'sum': preserves gradient reconstruction
+            - 'sum': preserves gradient reconstruction (default)
+            - 'standard': original DC sensitivity propagation
             - 'mask_diff': alternative formulation
         target_layers: Optional list of layer names (None = all)
     """
+    _lazy_import_mul_mean()
+    patch_mul, unpatch_mul, patch_mean, unpatch_mean = _get_mul_mean_patchers()
+
     for name, module in model.named_modules():
         if target_layers is not None and name not in target_layers:
             continue
@@ -115,10 +139,21 @@ def patch_model(
             patch_transpose(module)
         elif isinstance(module, Permute):
             patch_permute(module)
+        elif Mul is not None and isinstance(module, Mul):
+            patch_mul(module)
+        elif Mean is not None and isinstance(module, Mean):
+            patch_mean(module)
+        elif isinstance(module, nn.LayerNorm):
+            patch_layernorm(module)
+        elif isinstance(module, nn.Softmax):
+            patch_softmax(module)
 
 
 def unpatch_model(model: nn.Module) -> None:
     """Unpatch all layers, restoring original forward methods."""
+    _lazy_import_mul_mean()
+    patch_mul, unpatch_mul, patch_mean, unpatch_mean = _get_mul_mean_patchers()
+
     for name, module in model.named_modules():
         if isinstance(module, nn.Linear):
             unpatch_linear(module)
@@ -166,6 +201,14 @@ def unpatch_model(model: nn.Module) -> None:
             unpatch_transpose(module)
         elif isinstance(module, Permute):
             unpatch_permute(module)
+        elif Mul is not None and isinstance(module, Mul):
+            unpatch_mul(module)
+        elif Mean is not None and isinstance(module, Mean):
+            unpatch_mean(module)
+        elif isinstance(module, nn.LayerNorm):
+            unpatch_layernorm(module)
+        elif isinstance(module, nn.Softmax):
+            unpatch_softmax(module)
 
 
 def mark_output_layer(module: nn.Module, beta: float = 1.0) -> None:
@@ -227,20 +270,78 @@ def get_patched_layers(model: nn.Module) -> List[str]:
 
 def find_output_layer(model: nn.Module) -> Optional[nn.Module]:
     """
-    Find the last computational layer in the model (likely the output layer).
+    Find the last computational layer in the model (the output layer).
 
-    Excludes _dc_* modules added by make_dc_compatible() since those are
-    auxiliary modules (like ReLU replacements), not the actual output.
+    Uses forward hooks with a dummy input to find the actual last module call
+    in execution order, rather than registration order.
 
     Returns the module or None if not found.
     """
+    _lazy_import_mul_mean()
+
+    # Patchable layer types that can be output layers
+    output_layer_types = [
+        nn.Linear, nn.Conv2d, nn.Conv1d,
+        nn.ConvTranspose1d, nn.ConvTranspose2d,
+        nn.ReLU, nn.GELU, nn.Sigmoid, nn.Tanh, nn.Softmax,
+        nn.LayerNorm, nn.BatchNorm1d, nn.BatchNorm2d,
+        Add,
+    ]
+    if Mul is not None:
+        output_layer_types.append(Mul)
+    if Mean is not None:
+        output_layer_types.append(Mean)
+    output_layer_types = tuple(output_layer_types)
+
+    # Track execution order using hooks
+    execution_order = []
+    hooks = []
+
+    def make_hook(module):
+        def hook(mod, inp, out):
+            if isinstance(mod, output_layer_types):
+                execution_order.append(mod)
+        return hook
+
+    # Register hooks on all output_layer_types modules
+    for name, module in model.named_modules():
+        if isinstance(module, output_layer_types):
+            hooks.append(module.register_forward_hook(make_hook(module)))
+
+    # Try to run a forward pass to determine execution order
+    try:
+        model.eval()
+        with torch.no_grad():
+            # Create a dummy input that matches the model's expected input
+            # Try common input shapes
+            for shape in [
+                (1, 3, 32, 32),   # Image-like
+                (1, 64, 16, 16),  # Feature map
+                (1, 128),         # 1D vector
+                (1, 16, 64),      # Sequence-like
+            ]:
+                try:
+                    dummy = torch.zeros(*shape)
+                    model(dummy)
+                    break
+                except Exception:
+                    execution_order.clear()
+                    continue
+    except Exception:
+        pass
+    finally:
+        # Remove hooks
+        for h in hooks:
+            h.remove()
+
+    # Return the last executed layer
+    if execution_order:
+        return execution_order[-1]
+
+    # Fallback: use registration order
     last_layer = None
     for name, module in model.named_modules():
-        # Skip _dc_* modules added by functional_replacer
-        if name.startswith('_dc_') or '._dc_' in name:
-            continue
-        if isinstance(module, (nn.Linear, nn.Conv2d, nn.Conv1d,
-                               nn.ConvTranspose1d, nn.ConvTranspose2d)):
+        if isinstance(module, output_layer_types):
             last_layer = module
     return last_layer
 
@@ -260,7 +361,7 @@ def auto_mark_output_layer(model: nn.Module, beta: float = 1.0) -> Optional[nn.M
 def prepare_model_for_dc(
     model: nn.Module,
     relu_mode: str = 'max',
-    backprop_mode: str = 'standard',
+    backprop_mode: str = 'sum',
     beta: float = 1.0,
 ) -> nn.Module:
     """
@@ -268,8 +369,9 @@ def prepare_model_for_dc(
 
     This function:
     1. Replaces functional calls (torch.relu, +, etc.) with module equivalents
-    2. Patches all layers for DC decomposition
-    3. Automatically marks the output layer for backward initialization
+    2. Finds the output layer (before patching, so forward pass works normally)
+    3. Patches all layers for DC decomposition
+    4. Marks the output layer for backward initialization
 
     Args:
         model: The PyTorch model to prepare
@@ -293,12 +395,129 @@ def prepare_model_for_dc(
     model = make_dc_compatible(model)
     model.eval()
 
-    # Step 2: Patch all layers
+    # Step 2: Find output layer BEFORE patching (so forward pass works normally)
+    output_layer = find_output_layer(model)
+
+    # Step 3: Patch all layers
     patch_model(model, relu_mode=relu_mode, backprop_mode=backprop_mode)
 
-    # Step 3: Find and mark output layer
-    output_layer = find_output_layer(model)
+    # Step 4: Mark output layer
     if output_layer is not None:
         mark_output_layer(output_layer, beta)
 
     return model
+
+
+# =============================================================================
+# Logging Integration
+# =============================================================================
+
+_logging_enabled = False
+
+
+def enable_dc_logging(
+    level: str = 'INFO',
+    channels: Optional[List[str]] = None,
+    include_tensors: bool = False
+):
+    """
+    Enable logging for DC decomposition operations.
+
+    Args:
+        level: Log level ('DEBUG', 'INFO', 'WARNING', 'ERROR')
+        channels: Specific channels to enable (default: all except tensors)
+            - 'dc.forward': Forward pass logging
+            - 'dc.backward': Backward pass logging
+            - 'dc.tensors': Tensor values (very verbose)
+            - 'dc.recenter': Re-centering operations
+            - 'dc.patch': Patching operations
+        include_tensors: Include detailed tensor logging
+
+    Example:
+        enable_dc_logging('DEBUG')  # Verbose logging
+        enable_dc_logging('INFO', channels=['dc.forward'])  # Only forward pass
+        enable_dc_logging('DEBUG', include_tensors=True)  # Include tensor values
+    """
+    global _logging_enabled
+    import logging as _logging
+    from .logging_config import enable_logging, wrap_autograd_function
+
+    level_map = {
+        'DEBUG': _logging.DEBUG,
+        'INFO': _logging.INFO,
+        'WARNING': _logging.WARNING,
+        'ERROR': _logging.ERROR,
+    }
+    log_level = level_map.get(level.upper(), _logging.INFO)
+
+    enable_logging(log_level, channels, include_tensors)
+
+    # Wrap all DC autograd functions with logging (only once)
+    if not _logging_enabled:
+        _wrap_all_dc_functions()
+        _logging_enabled = True
+
+
+def disable_dc_logging():
+    """Disable DC logging."""
+    from .logging_config import disable_logging
+    disable_logging()
+
+
+def _wrap_all_dc_functions():
+    """Wrap all DC autograd functions with logging."""
+    from .logging_config import wrap_autograd_function
+
+    # Import all DC function classes
+    from .operations.linear import DCLinearFunction
+    from .operations.conv import DCConv1dFunction, DCConv2dFunction
+    from .operations.conv_transpose import DCConvTranspose1dFunction, DCConvTranspose2dFunction
+    from .operations.relu import DCReLUFunction
+    from .operations.batchnorm import DCBatchNormFunction
+    from .operations.maxpool import DCMaxPool1dFunction, DCMaxPool2dFunction
+    from .operations.avgpool import (
+        DCAvgPool1dFunction, DCAvgPool2dFunction,
+        DCAdaptiveAvgPool1dFunction, DCAdaptiveAvgPool2dFunction
+    )
+    from .operations.add import DCAddFunction
+    from .operations.shape_ops import (
+        DCFlattenFunction, DCUnflattenFunction, DCReshapeFunction,
+        DCSqueezeFunction, DCUnsqueezeFunction, DCTransposeFunction,
+        DCPermuteFunction, DCDropoutFunction
+    )
+    from .operations.layernorm import DCLayerNormFunction
+    from .operations.softmax import DCSoftmaxFunction
+    from .functional_replacer import DCMulFunction, DCMeanFunction
+
+    # Wrap each function class
+    function_classes = [
+        (DCLinearFunction, "Linear"),
+        (DCConv1dFunction, "Conv1d"),
+        (DCConv2dFunction, "Conv2d"),
+        (DCConvTranspose1dFunction, "ConvT1d"),
+        (DCConvTranspose2dFunction, "ConvT2d"),
+        (DCReLUFunction, "ReLU"),
+        (DCBatchNormFunction, "BatchNorm"),
+        (DCMaxPool1dFunction, "MaxPool1d"),
+        (DCMaxPool2dFunction, "MaxPool2d"),
+        (DCAvgPool1dFunction, "AvgPool1d"),
+        (DCAvgPool2dFunction, "AvgPool2d"),
+        (DCAdaptiveAvgPool1dFunction, "AdaptAvgPool1d"),
+        (DCAdaptiveAvgPool2dFunction, "AdaptAvgPool2d"),
+        (DCAddFunction, "Add"),
+        (DCFlattenFunction, "Flatten"),
+        (DCUnflattenFunction, "Unflatten"),
+        (DCReshapeFunction, "Reshape"),
+        (DCSqueezeFunction, "Squeeze"),
+        (DCUnsqueezeFunction, "Unsqueeze"),
+        (DCTransposeFunction, "Transpose"),
+        (DCPermuteFunction, "Permute"),
+        (DCDropoutFunction, "Dropout"),
+        (DCLayerNormFunction, "LayerNorm"),
+        (DCSoftmaxFunction, "Softmax"),
+        (DCMulFunction, "Mul"),
+        (DCMeanFunction, "Mean"),
+    ]
+
+    for func_cls, name in function_classes:
+        wrap_autograd_function(func_cls, name)

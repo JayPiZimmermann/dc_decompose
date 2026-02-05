@@ -14,8 +14,8 @@ from torch import Tensor
 from typing import Tuple
 
 from .base import (
-    split_input_4, make_input_4, split_grad_4, make_grad_4, recenter_dc,
-    DC_ENABLED, DC_ORIGINAL_FORWARD
+    init_backward, recenter_forward, make_grad_4,
+    DC_ENABLED, DC_ORIGINAL_FORWARD, DC_IS_OUTPUT_LAYER, DC_BETA
 )
 
 
@@ -25,28 +25,28 @@ class DCAddFunction(torch.autograd.Function):
 
     Forward: adds two [4*batch] tensors and re-centers the result.
     Backward: distributes gradients to both inputs.
-
-    Note: recenter preserves z = pos - neg, so gradient reconstruction
-    (g = pp - np - pn + nn) works correctly with unchanged gradients.
     """
 
     @staticmethod
-    def forward(ctx, x_4: Tensor, y_4: Tensor, recenter: bool) -> Tensor:
-        sum_4 = x_4 + y_4
+    def forward(ctx, x_4: Tensor, y_4: Tensor, recenter: bool,
+                is_output_layer: bool, beta: float) -> Tensor:
+        result = x_4 + y_4
 
         if recenter:
-            result = recenter_dc(sum_4)
-        else:
-            result = sum_4
+            result = recenter_forward(result)
 
+        ctx.is_output_layer = is_output_layer
+        ctx.beta = beta
         return result
 
     @staticmethod
-    def backward(ctx, grad_4: Tensor) -> Tuple[Tensor, Tensor, None]:
-        # Addition distributes gradients to both inputs unchanged.
-        # Recenter preserves z = pos - neg, so gradient reconstruction works.
-        return grad_4, grad_4, None
+    def backward(ctx, grad_4: Tensor) -> Tuple[Tensor, Tensor, None, None, None]:
+        delta_pp, delta_np, delta_pn, delta_nn = init_backward(
+            grad_4, ctx.is_output_layer, ctx.beta)
 
+        # Addition distributes gradients to both inputs unchanged.
+        out_grad = make_grad_4(delta_pp, delta_np, delta_pn, delta_nn)
+        return out_grad, out_grad, None, None, None
 
 class Add(nn.Module):
     """
@@ -71,7 +71,11 @@ class Add(nn.Module):
 
 def dc_forward_add(module: Add, x: Tensor, y: Tensor) -> Tensor:
     """DC-aware forward for Add module."""
-    return DCAddFunction.apply(x, y, module.recenter)
+    return DCAddFunction.apply(
+        x, y, module.recenter,
+        getattr(module, DC_IS_OUTPUT_LAYER, False),
+        getattr(module, DC_BETA, 1.0)
+    )
 
 
 def patch_add(module: Add) -> None:
@@ -80,6 +84,8 @@ def patch_add(module: Add) -> None:
         return
     setattr(module, DC_ORIGINAL_FORWARD, module.forward)
     setattr(module, DC_ENABLED, True)
+    setattr(module, DC_IS_OUTPUT_LAYER, False)
+    setattr(module, DC_BETA, 1.0)
 
     def patched(x, y):
         if getattr(module, DC_ENABLED, False):

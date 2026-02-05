@@ -4,19 +4,9 @@ DC Decomposition Operations Module
 Forward: [4*batch] = [pos; neg; pos; neg]
 Backward: [4*batch] = [delta_pp; delta_np; delta_pn; delta_nn]
 
-Usage:
-    from dc_decompose.operations import patch_model, mark_output_layer, init_catted, reconstruct_output
-
-    patch_model(model)
-    mark_output_layer(model.fc, beta=1.0)  # Mark last layer
-
-    # Forward
-    x_catted = init_catted(x)
-    output_catted = model(x_catted)
-    reconstructed = reconstruct_output(output_catted)
-
-    # Backward (call on reconstructed output)
-    reconstructed.backward(gradient)
+This module contains layer-level DC operations (linear, conv, relu, etc.).
+For model-level utilities (patch_model, prepare_model_for_dc, make_dc_compatible),
+import from dc_decompose directly.
 """
 
 from .base import (
@@ -30,8 +20,10 @@ from .base import (
 from .add import Add, DCAdd, dc_add, DCAddFunction, patch_add, unpatch_add
 
 from .linear import patch_linear, unpatch_linear, DCLinearFunction
-from .conv2d import patch_conv2d, unpatch_conv2d, DCConv2dFunction
-from .conv1d import patch_conv1d, unpatch_conv1d, DCConv1dFunction
+from .conv import (
+    patch_conv2d, unpatch_conv2d, DCConv2dFunction,
+    patch_conv1d, unpatch_conv1d, DCConv1dFunction,
+)
 from .conv_transpose import (
     patch_conv_transpose1d, patch_conv_transpose2d,
     unpatch_conv_transpose1d, unpatch_conv_transpose2d,
@@ -63,19 +55,8 @@ from .shape_ops import (
     Permute, patch_permute, unpatch_permute, DCPermuteFunction,
     patch_dropout, unpatch_dropout, DCDropoutFunction,
 )
-
-from .patcher import (
-    patch_model, unpatch_model,
-    mark_output_layer, unmark_output_layer,
-    auto_mark_output_layer, find_output_layer,
-    set_dc_enabled, dc_disabled,
-    is_patched, get_patched_layers,
-    prepare_model_for_dc,
-)
-
-from .functional_replacer import make_dc_compatible, replace_functional_with_modules
-
-from .testing import DCTester, LayerCache, test_model
+from .layernorm import patch_layernorm, unpatch_layernorm
+from .softmax import patch_softmax, unpatch_softmax
 
 __all__ = [
     # Base
@@ -88,9 +69,8 @@ __all__ = [
     'Add', 'DCAdd', 'dc_add', 'DCAddFunction', 'patch_add', 'unpatch_add',
     # Linear
     'patch_linear', 'unpatch_linear', 'DCLinearFunction',
-    # Conv2d
+    # Conv
     'patch_conv2d', 'unpatch_conv2d', 'DCConv2dFunction',
-    # Conv1d
     'patch_conv1d', 'unpatch_conv1d', 'DCConv1dFunction',
     # ConvTranspose
     'patch_conv_transpose1d', 'patch_conv_transpose2d',
@@ -121,15 +101,8 @@ __all__ = [
     'Transpose', 'patch_transpose', 'unpatch_transpose', 'DCTransposeFunction',
     'Permute', 'patch_permute', 'unpatch_permute', 'DCPermuteFunction',
     'patch_dropout', 'unpatch_dropout', 'DCDropoutFunction',
-    # Model-level
-    'patch_model', 'unpatch_model',
-    'mark_output_layer', 'unmark_output_layer',
-    'auto_mark_output_layer', 'find_output_layer',
-    'set_dc_enabled', 'dc_disabled',
-    'is_patched', 'get_patched_layers',
-    'prepare_model_for_dc',
-    # Functional replacer
-    'make_dc_compatible', 'replace_functional_with_modules',
-    # Testing
-    'DCTester', 'LayerCache', 'test_model',
+    # LayerNorm
+    'patch_layernorm', 'unpatch_layernorm',
+    # Softmax
+    'patch_softmax', 'unpatch_softmax',
 ]

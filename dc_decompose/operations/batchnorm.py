@@ -6,7 +6,11 @@ import torch.nn.functional as F
 from torch import Tensor
 from typing import Tuple, Union
 
-from .base import split_input_4, make_output_4, split_grad_4, make_grad_4, DC_ENABLED, DC_ORIGINAL_FORWARD, DC_IS_OUTPUT_LAYER, DC_BETA
+from .base import (
+    split_input_4, make_output_4, make_grad_4,
+    init_backward, recenter_forward,
+    DC_ENABLED, DC_ORIGINAL_FORWARD, DC_IS_OUTPUT_LAYER, DC_BETA
+)
 
 
 class DCBatchNormFunction(torch.autograd.Function):
@@ -43,21 +47,16 @@ class DCBatchNormFunction(torch.autograd.Function):
         ctx.save_for_backward(scale_pos, scale_neg)
         ctx.is_output_layer = is_output_layer
         ctx.beta = beta
-        ctx.batch_size = pos.shape[0]
 
-        return make_output_4(out_pos, out_neg)
+        output = make_output_4(out_pos, out_neg)
+        return recenter_forward(output)
 
     @staticmethod
     def backward(ctx, grad_4: Tensor) -> Tuple[Tensor, None, None, None, None, None, None, None, None]:
         scale_pos, scale_neg = ctx.saved_tensors
 
-        if ctx.is_output_layer:
-            q = grad_4.shape[0] // 4
-            gp, gn = grad_4[:q], grad_4[q:2*q]
-            delta_pp, delta_np = ctx.beta * gp, torch.zeros_like(gp)
-            delta_pn, delta_nn = (1 - ctx.beta) * gn, torch.zeros_like(gn)
-        else:
-            delta_pp, delta_np, delta_pn, delta_nn = split_grad_4(grad_4)
+        delta_pp, delta_np, delta_pn, delta_nn = init_backward(
+            grad_4, ctx.is_output_layer, ctx.beta)
 
         new_pp = scale_pos * delta_pp + scale_neg * delta_np
         new_np = scale_neg * delta_pp + scale_pos * delta_np

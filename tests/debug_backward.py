@@ -8,7 +8,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 import torch.nn as nn
-from dc_decompose.operations.patcher import patch_model, unpatch_model, mark_output_layer
+from dc_decompose.patcher import patch_model, unpatch_model, mark_output_layer
 from dc_decompose.operations.base import init_catted, reconstruct_output, InputMode
 
 

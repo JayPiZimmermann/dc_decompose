@@ -5,7 +5,11 @@ import torch.nn as nn
 from torch import Tensor
 from typing import Tuple, Type
 
-from .base import split_input_4, make_output_4, split_grad_4, make_grad_4, DC_ENABLED, DC_ORIGINAL_FORWARD, DC_RELU_MODE, DC_IS_OUTPUT_LAYER, DC_BETA
+from .base import (
+    split_input_4, make_output_4, make_grad_4,
+    init_backward, recenter_forward,
+    DC_ENABLED, DC_ORIGINAL_FORWARD, DC_RELU_MODE, DC_IS_OUTPUT_LAYER, DC_BETA
+)
 
 DC_BACKPROP_MODE = '_dc_backprop_mode'
 DC_RELU_FUNCTION = '_dc_relu_function'
@@ -104,31 +108,20 @@ def _make_relu_function(split_mode: str, backprop_mode: str) -> Type[torch.autog
             ctx.save_for_backward(z)
             ctx.is_output_layer, ctx.beta = is_output_layer, beta
 
-            return make_output_4(out_pos, out_neg)
+            output = make_output_4(out_pos, out_neg)
+            return recenter_forward(output)
 
         @staticmethod
         def backward(ctx, grad_4: Tensor) -> Tuple[Tensor, None, None]:
             z, = ctx.saved_tensors
             mp, mn = (z >= 0).float(), (z < 0).float()
 
-            if ctx.is_output_layer:
-                # Output layer: standard initialization (same as Linear)
-                # grad_4 = [target_grad; -target_grad; 0; 0] from out_pos - out_neg backward
-                q = grad_4.shape[0] // 4
-                grad_pos = grad_4[:q]
-                grad_neg = grad_4[q:2*q]
+            delta_pp, delta_np, delta_pn, delta_nn = init_backward(
+                grad_4, ctx.is_output_layer, ctx.beta)
 
-                delta_pp = ctx.beta * grad_pos
-                delta_np = torch.zeros_like(grad_pos)
-                delta_pn = (1 - ctx.beta) * grad_neg
-                delta_nn = torch.zeros_like(grad_neg)
-            else:
-                # Intermediate layer: reconstruct upstream gradient from 4-sensitivities
-                delta_pp_in, delta_np_in, delta_pn_in, delta_nn_in = split_grad_4(grad_4)
-                g = delta_pp_in - delta_np_in - delta_pn_in + delta_nn_in
-
-                # Create sensitivities in compensating format for reference formulas
-                # This ensures reconstruction after backprop equals g * mp
+            # For intermediate layers: reconstruct and re-split for ReLU backward
+            if not ctx.is_output_layer:
+                g = delta_pp - delta_np - delta_pn + delta_nn
                 delta_pp = g
                 delta_np = -g * mn
                 delta_pn = torch.zeros_like(g)
