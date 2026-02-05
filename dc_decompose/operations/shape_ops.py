@@ -9,7 +9,7 @@ import torch.nn as nn
 from torch import Tensor
 from typing import Tuple, Union, List
 
-from .base import split_input_4, make_output_4, split_grad_4, make_grad_4, DC_ENABLED, DC_ORIGINAL_FORWARD, DC_IS_OUTPUT_LAYER, DC_BETA
+from .base import split_input_4, make_output_4, make_grad_4, init_backward, DC_ENABLED, DC_ORIGINAL_FORWARD, DC_IS_OUTPUT_LAYER, DC_BETA
 
 
 # =============================================================================
@@ -34,13 +34,8 @@ class DCFlattenFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_4: Tensor) -> Tuple[Tensor, None, None, None, None]:
-        if ctx.is_output_layer:
-            q = grad_4.shape[0] // 4
-            gp, gn = grad_4[:q], grad_4[q:2*q]
-            delta_pp, delta_np = ctx.beta * gp, torch.zeros_like(gp)
-            delta_pn, delta_nn = (1 - ctx.beta) * gn, torch.zeros_like(gn)
-        else:
-            delta_pp, delta_np, delta_pn, delta_nn = split_grad_4(grad_4)
+        delta_pp, delta_np, delta_pn, delta_nn = init_backward(
+            grad_4, ctx.is_output_layer, ctx.beta)
 
         new_pp = delta_pp.view(ctx.input_shape)
         new_np = delta_np.view(ctx.input_shape)
@@ -101,13 +96,8 @@ class DCUnflattenFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_4: Tensor) -> Tuple[Tensor, None, None, None, None]:
-        if ctx.is_output_layer:
-            q = grad_4.shape[0] // 4
-            gp, gn = grad_4[:q], grad_4[q:2*q]
-            delta_pp, delta_np = ctx.beta * gp, torch.zeros_like(gp)
-            delta_pn, delta_nn = (1 - ctx.beta) * gn, torch.zeros_like(gn)
-        else:
-            delta_pp, delta_np, delta_pn, delta_nn = split_grad_4(grad_4)
+        delta_pp, delta_np, delta_pn, delta_nn = init_backward(
+            grad_4, ctx.is_output_layer, ctx.beta)
 
         # Flatten back to original shape
         new_pp = delta_pp.flatten(ctx.dim, ctx.dim + len(grad_4.shape) - len(ctx.input_shape))
@@ -180,13 +170,8 @@ class DCReshapeFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_4: Tensor) -> Tuple[Tensor, None, None, None]:
-        if ctx.is_output_layer:
-            q = grad_4.shape[0] // 4
-            gp, gn = grad_4[:q], grad_4[q:2*q]
-            delta_pp, delta_np = ctx.beta * gp, torch.zeros_like(gp)
-            delta_pn, delta_nn = (1 - ctx.beta) * gn, torch.zeros_like(gn)
-        else:
-            delta_pp, delta_np, delta_pn, delta_nn = split_grad_4(grad_4)
+        delta_pp, delta_np, delta_pn, delta_nn = init_backward(
+            grad_4, ctx.is_output_layer, ctx.beta)
 
         new_pp = delta_pp.reshape(ctx.input_shape)
         new_np = delta_np.reshape(ctx.input_shape)
@@ -308,13 +293,8 @@ class DCSqueezeFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_4: Tensor) -> Tuple[Tensor, None, None, None]:
-        if ctx.is_output_layer:
-            q = grad_4.shape[0] // 4
-            gp, gn = grad_4[:q], grad_4[q:2*q]
-            delta_pp, delta_np = ctx.beta * gp, torch.zeros_like(gp)
-            delta_pn, delta_nn = (1 - ctx.beta) * gn, torch.zeros_like(gn)
-        else:
-            delta_pp, delta_np, delta_pn, delta_nn = split_grad_4(grad_4)
+        delta_pp, delta_np, delta_pn, delta_nn = init_backward(
+            grad_4, ctx.is_output_layer, ctx.beta)
 
         new_pp = delta_pp.view(ctx.input_shape)
         new_np = delta_np.view(ctx.input_shape)
@@ -385,13 +365,8 @@ class DCUnsqueezeFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_4: Tensor) -> Tuple[Tensor, None, None, None]:
-        if ctx.is_output_layer:
-            q = grad_4.shape[0] // 4
-            gp, gn = grad_4[:q], grad_4[q:2*q]
-            delta_pp, delta_np = ctx.beta * gp, torch.zeros_like(gp)
-            delta_pn, delta_nn = (1 - ctx.beta) * gn, torch.zeros_like(gn)
-        else:
-            delta_pp, delta_np, delta_pn, delta_nn = split_grad_4(grad_4)
+        delta_pp, delta_np, delta_pn, delta_nn = init_backward(
+            grad_4, ctx.is_output_layer, ctx.beta)
 
         new_pp = delta_pp.squeeze(ctx.dim)
         new_np = delta_np.squeeze(ctx.dim)
@@ -463,13 +438,8 @@ class DCTransposeFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_4: Tensor) -> Tuple[Tensor, None, None, None, None]:
-        if ctx.is_output_layer:
-            q = grad_4.shape[0] // 4
-            gp, gn = grad_4[:q], grad_4[q:2*q]
-            delta_pp, delta_np = ctx.beta * gp, torch.zeros_like(gp)
-            delta_pn, delta_nn = (1 - ctx.beta) * gn, torch.zeros_like(gn)
-        else:
-            delta_pp, delta_np, delta_pn, delta_nn = split_grad_4(grad_4)
+        delta_pp, delta_np, delta_pn, delta_nn = init_backward(
+            grad_4, ctx.is_output_layer, ctx.beta)
 
         # Transpose is its own inverse
         new_pp = delta_pp.transpose(ctx.dim0, ctx.dim1)
@@ -541,13 +511,8 @@ class DCPermuteFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_4: Tensor) -> Tuple[Tensor, None, None, None]:
-        if ctx.is_output_layer:
-            q = grad_4.shape[0] // 4
-            gp, gn = grad_4[:q], grad_4[q:2*q]
-            delta_pp, delta_np = ctx.beta * gp, torch.zeros_like(gp)
-            delta_pn, delta_nn = (1 - ctx.beta) * gn, torch.zeros_like(gn)
-        else:
-            delta_pp, delta_np, delta_pn, delta_nn = split_grad_4(grad_4)
+        delta_pp, delta_np, delta_pn, delta_nn = init_backward(
+            grad_4, ctx.is_output_layer, ctx.beta)
 
         # Compute inverse permutation
         inv_dims = [0] * len(ctx.dims)

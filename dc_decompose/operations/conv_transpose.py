@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from torch import Tensor
 from typing import Optional, Tuple
 
-from .base import split_input_4, make_output_4, split_grad_4, make_grad_4, DC_ENABLED, DC_ORIGINAL_FORWARD, DC_IS_OUTPUT_LAYER, DC_BETA
+from .base import split_input_4, make_output_4, make_grad_4, init_backward, DC_ENABLED, DC_ORIGINAL_FORWARD, DC_IS_OUTPUT_LAYER, DC_BETA
 
 
 class DCConvTranspose2dFunction(torch.autograd.Function):
@@ -40,13 +40,8 @@ class DCConvTranspose2dFunction(torch.autograd.Function):
     def backward(ctx, grad_4: Tensor):
         weight_pos, weight_neg = ctx.saved_tensors
 
-        if ctx.is_output_layer:
-            q = grad_4.shape[0] // 4
-            gp, gn = grad_4[:q], grad_4[q:2*q]
-            delta_pp, delta_np = ctx.beta * gp, torch.zeros_like(gp)
-            delta_pn, delta_nn = (1 - ctx.beta) * gn, torch.zeros_like(gn)
-        else:
-            delta_pp, delta_np, delta_pn, delta_nn = split_grad_4(grad_4)
+        delta_pp, delta_np, delta_pn, delta_nn = init_backward(
+            grad_4, ctx.is_output_layer, ctx.beta)
 
         # Backward of conv_transpose is conv
         def conv(d, w):
@@ -91,13 +86,8 @@ class DCConvTranspose1dFunction(torch.autograd.Function):
     def backward(ctx, grad_4: Tensor):
         weight_pos, weight_neg = ctx.saved_tensors
 
-        if ctx.is_output_layer:
-            q = grad_4.shape[0] // 4
-            gp, gn = grad_4[:q], grad_4[q:2*q]
-            delta_pp, delta_np = ctx.beta * gp, torch.zeros_like(gp)
-            delta_pn, delta_nn = (1 - ctx.beta) * gn, torch.zeros_like(gn)
-        else:
-            delta_pp, delta_np, delta_pn, delta_nn = split_grad_4(grad_4)
+        delta_pp, delta_np, delta_pn, delta_nn = init_backward(
+            grad_4, ctx.is_output_layer, ctx.beta)
 
         def conv(d, w):
             return F.conv1d(d, w, None, ctx.stride, ctx.padding, ctx.dilation, ctx.groups)
