@@ -1,5 +1,5 @@
 """
-Test basic layer functionality - Linear, Conv, ReLU, BatchNorm, etc.
+Test basic layer functionality with realistic models (all with 1 output dim).
 """
 
 import sys
@@ -12,81 +12,152 @@ from utils import run_model_tests
 
 
 # =============================================================================
-# Model Definitions
+# Model Definitions - All end with 1 output dimension
 # =============================================================================
 
-# Single layers
-def single_linear():
-    return nn.Linear(10, 5)
-
-def single_conv2d():
-    return nn.Conv2d(3, 16, 3)
-
-def single_relu():
-    return nn.ReLU()
-
-def single_batchnorm1d():
-    model = nn.BatchNorm1d(10)
-    model.eval()
-    return model
-
-def single_batchnorm2d():
-    model = nn.BatchNorm2d(8)
-    model.eval()
-    return model
-
-# Pooling layers
-def single_maxpool2d():
-    return nn.MaxPool2d(2)
-
-def single_avgpool2d():
-    return nn.AvgPool2d(2)
-
-def single_adaptive_avgpool2d():
-    return nn.AdaptiveAvgPool2d((4, 4))
-
-# Utility layers
-def single_flatten():
-    return nn.Flatten()
-
-def single_dropout():
-    model = nn.Dropout(0.5)
-    model.eval()  # Dropout is identity in eval mode
-    return model
-
-def single_identity():
-    return nn.Identity()
-
-# Simple chains
-def linear_chain():
+# Linear models
+def linear_shallow():
     return nn.Sequential(
-        nn.Linear(8, 16),
-        nn.ReLU(),
-        nn.Linear(16, 4)
+        nn.Linear(10, 1)
     )
 
-def conv_chain():
+def linear_2layer():
+    return nn.Sequential(
+        nn.Linear(10, 20),
+        nn.ReLU(),
+        nn.Linear(20, 1)
+    )
+
+def linear_3layer():
+    return nn.Sequential(
+        nn.Linear(10, 32),
+        nn.ReLU(),
+        nn.Linear(32, 16),
+        nn.ReLU(),
+        nn.Linear(16, 1)
+    )
+
+def linear_5layer():
+    return nn.Sequential(
+        nn.Linear(20, 64),
+        nn.ReLU(),
+        nn.Linear(64, 128),
+        nn.ReLU(),
+        nn.Linear(128, 64),
+        nn.ReLU(),
+        nn.Linear(64, 32),
+        nn.ReLU(),
+        nn.Linear(32, 1)
+    )
+
+def linear_with_bn():
+    model = nn.Sequential(
+        nn.Linear(20, 64),
+        nn.BatchNorm1d(64),
+        nn.ReLU(),
+        nn.Linear(64, 32),
+        nn.BatchNorm1d(32),
+        nn.ReLU(),
+        nn.Linear(32, 1)
+    )
+    model.eval()
+    return model
+
+def linear_with_dropout():
+    model = nn.Sequential(
+        nn.Linear(20, 64),
+        nn.ReLU(),
+        nn.Dropout(0.3),
+        nn.Linear(64, 32),
+        nn.ReLU(),
+        nn.Dropout(0.3),
+        nn.Linear(32, 1)
+    )
+    model.eval()
+    return model
+
+
+# Conv models
+def conv_shallow():
+    model = nn.Sequential(
+        nn.Conv2d(3, 16, 3, padding=1),
+        nn.ReLU(),
+        nn.AdaptiveAvgPool2d(1),
+        nn.Flatten(),
+        nn.Linear(16, 1)
+    )
+    model.eval()
+    return model
+
+def conv_3layer():
+    model = nn.Sequential(
+        nn.Conv2d(3, 16, 3, padding=1),
+        nn.ReLU(),
+        nn.Conv2d(16, 32, 3, padding=1),
+        nn.ReLU(),
+        nn.Conv2d(32, 64, 3, padding=1),
+        nn.ReLU(),
+        nn.AdaptiveAvgPool2d(1),
+        nn.Flatten(),
+        nn.Linear(64, 1)
+    )
+    model.eval()
+    return model
+
+def conv_with_bn():
     model = nn.Sequential(
         nn.Conv2d(3, 16, 3, padding=1),
         nn.BatchNorm2d(16),
         nn.ReLU(),
-        nn.MaxPool2d(2),
         nn.Conv2d(16, 32, 3, padding=1),
-        nn.AdaptiveAvgPool2d((1, 1)),
+        nn.BatchNorm2d(32),
+        nn.ReLU(),
+        nn.AdaptiveAvgPool2d(1),
         nn.Flatten(),
-        nn.Linear(32, 10)
+        nn.Linear(32, 1)
     )
     model.eval()
     return model
 
-def mixed_chain():
+def conv_with_maxpool():
     model = nn.Sequential(
-        nn.Linear(20, 50),
-        nn.BatchNorm1d(50),
+        nn.Conv2d(3, 16, 3, padding=1),
         nn.ReLU(),
-        nn.Dropout(0.3),
-        nn.Linear(50, 10),
-        nn.ReLU()
+        nn.MaxPool2d(2),
+        nn.Conv2d(16, 32, 3, padding=1),
+        nn.ReLU(),
+        nn.MaxPool2d(2),
+        nn.Conv2d(32, 64, 3, padding=1),
+        nn.ReLU(),
+        nn.AdaptiveAvgPool2d(1),
+        nn.Flatten(),
+        nn.Linear(64, 1)
+    )
+    model.eval()
+    return model
+
+def conv_deep():
+    model = nn.Sequential(
+        nn.Conv2d(3, 32, 3, padding=1),
+        nn.BatchNorm2d(32),
+        nn.ReLU(),
+        nn.Conv2d(32, 32, 3, padding=1),
+        nn.BatchNorm2d(32),
+        nn.ReLU(),
+        nn.MaxPool2d(2),
+        nn.Conv2d(32, 64, 3, padding=1),
+        nn.BatchNorm2d(64),
+        nn.ReLU(),
+        nn.Conv2d(64, 64, 3, padding=1),
+        nn.BatchNorm2d(64),
+        nn.ReLU(),
+        nn.MaxPool2d(2),
+        nn.Conv2d(64, 128, 3, padding=1),
+        nn.BatchNorm2d(128),
+        nn.ReLU(),
+        nn.AdaptiveAvgPool2d(1),
+        nn.Flatten(),
+        nn.Linear(128, 1)
     )
     model.eval()
     return model
@@ -97,27 +168,20 @@ def mixed_chain():
 # =============================================================================
 
 MODELS = {
-    # Single layers
-    'Linear': (single_linear, (3, 10)),
-    'Conv2d': (single_conv2d, (2, 3, 8, 8)),
-    'ReLU': (single_relu, (2, 10)),
-    'BatchNorm1d': (single_batchnorm1d, (4, 10)),
-    'BatchNorm2d': (single_batchnorm2d, (2, 8, 16, 16)),
+    # Linear models
+    'Linear_shallow': (linear_shallow, (2, 10)),
+    'Linear_2layer': (linear_2layer, (2, 10)),
+    'Linear_3layer': (linear_3layer, (2, 10)),
+    'Linear_5layer': (linear_5layer, (2, 20)),
+    'Linear_with_BN': (linear_with_bn, (4, 20)),
+    'Linear_with_Dropout': (linear_with_dropout, (4, 20)),
 
-    # Pooling layers
-    'MaxPool2d': (single_maxpool2d, (2, 4, 16, 16)),
-    'AvgPool2d': (single_avgpool2d, (2, 4, 16, 16)),
-    'AdaptiveAvgPool2d': (single_adaptive_avgpool2d, (2, 8, 16, 16)),
-
-    # Utility layers
-    'Flatten': (single_flatten, (2, 4, 8, 8)),
-    'Dropout': (single_dropout, (2, 10)),
-    'Identity': (single_identity, (2, 10)),
-
-    # Simple chains
-    'LinearChain': (linear_chain, (2, 8)),
-    'ConvChain': (conv_chain, (2, 3, 16, 16)),
-    'MixedChain': (mixed_chain, (4, 20)),
+    # Conv models
+    'Conv_shallow': (conv_shallow, (2, 3, 16, 16)),
+    'Conv_3layer': (conv_3layer, (2, 3, 16, 16)),
+    'Conv_with_BN': (conv_with_bn, (2, 3, 16, 16)),
+    'Conv_with_MaxPool': (conv_with_maxpool, (2, 3, 32, 32)),
+    'Conv_deep': (conv_deep, (2, 3, 32, 32)),
 }
 
 

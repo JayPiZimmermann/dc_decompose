@@ -224,10 +224,58 @@ def init_pos_neg(x: Tensor, mode: InputMode = InputMode.CENTER) -> Tuple[Tensor,
     raise ValueError(f"Unknown mode: {mode}")
 
 
+class InitCattedFunction(torch.autograd.Function):
+    """
+    Custom autograd function for init_catted.
+
+    Forward: x -> [pos; neg; pos; neg] where pos = relu(x), neg = relu(-x)
+             The DC format creation is detached - no gradient flows through relu.
+    Backward: Pass gradients through unchanged. The DC layers handle gradient
+              transformation via their own 4-sensitivity logic.
+    """
+
+    @staticmethod
+    def forward(ctx, x: Tensor, mode_value: int) -> Tensor:
+        # mode_value: 0=CENTER, 1=POSITIVE, 2=NEGATIVE
+        # Create DC format with detached operations
+        with torch.no_grad():
+            if mode_value == 0:  # CENTER
+                pos = torch.relu(x)
+                neg = torch.relu(-x)
+            elif mode_value == 1:  # POSITIVE
+                pos = x.clone()
+                neg = torch.zeros_like(x)
+            else:  # NEGATIVE
+                pos = torch.zeros_like(x)
+                neg = -x
+
+        # Create output that requires grad if input does
+        result = torch.cat([pos, neg, pos, neg], dim=0)
+        return result
+
+    @staticmethod
+    def backward(ctx, grad_4: Tensor) -> Tuple[Tensor, None]:
+        # Pass gradient through unchanged - reconstruct from 4-sensitivity format
+        # grad_4 is [4*batch] = [delta_pp; delta_np; delta_pn; delta_nn]
+        q = grad_4.shape[0] // 4
+        delta_pp = grad_4[:q]
+        delta_np = grad_4[q:2*q]
+        delta_pn = grad_4[2*q:3*q]
+        delta_nn = grad_4[3*q:]
+
+        # Reconstruct gradient: this is the standard DC gradient reconstruction
+        # grad_x = d(loss)/d(pos) - d(loss)/d(neg)
+        # where d(loss)/d(pos) comes from pp path and d(loss)/d(neg) from nn path
+        grad_x = delta_pp - delta_np - delta_pn + delta_nn
+
+        return grad_x, None
+
+
 def init_catted(x: Tensor, mode: InputMode = InputMode.CENTER) -> Tensor:
     """Initialize [4*batch] input for DC forward: [pos; neg; pos; neg]."""
-    pos, neg = init_pos_neg(x, mode)
-    result = make_input_4(pos, neg)
+    # Convert mode to int for autograd function
+    mode_value = 0 if mode == InputMode.CENTER else (1 if mode == InputMode.POSITIVE else 2)
+    result = InitCattedFunction.apply(x, mode_value)
 
     # Log initialization
     try:
@@ -238,6 +286,8 @@ def init_catted(x: Tensor, mode: InputMode = InputMode.CENTER) -> Tensor:
             log.info(f"init_catted: {list(x.shape)} -> {list(result.shape)} (mode={mode.value})")
         tensor_log = get_logger('dc.tensors')
         if tensor_log.isEnabledFor(TENSOR_LEVEL):
+            q = result.shape[0] // 4
+            pos, neg = result[:q], result[q:2*q]
             tensor_log.log(TENSOR_LEVEL, f"init: x_mean={x.mean().item():.4f}, pos_mean={pos.mean().item():.4f}, neg_mean={neg.mean().item():.4f}")
     except ImportError:
         pass
