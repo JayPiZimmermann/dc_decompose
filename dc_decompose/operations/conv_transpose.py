@@ -107,14 +107,14 @@ def dc_forward_conv_transpose2d(m: nn.ConvTranspose2d, x: Tensor) -> Tensor:
     dilation = m.dilation if isinstance(m.dilation, tuple) else (m.dilation, m.dilation)
     return DCConvTranspose2dFunction.apply(
         x, m.weight, m.bias, stride, padding, output_padding, dilation, m.groups,
-        getattr(m, DC_IS_OUTPUT_LAYER, False), getattr(m, DC_BETA, 1.0)
+        getattr(m, DC_IS_OUTPUT_LAYER, False), getattr(m, DC_BETA, 0.5)
     )
 
 
 def dc_forward_conv_transpose1d(m: nn.ConvTranspose1d, x: Tensor) -> Tensor:
     return DCConvTranspose1dFunction.apply(
         x, m.weight, m.bias, m.stride[0], m.padding[0], m.output_padding[0], m.dilation[0], m.groups,
-        getattr(m, DC_IS_OUTPUT_LAYER, False), getattr(m, DC_BETA, 1.0)
+        getattr(m, DC_IS_OUTPUT_LAYER, False), getattr(m, DC_BETA, 0.5)
     )
 
 
@@ -123,7 +123,7 @@ def patch_conv_transpose2d(m: nn.ConvTranspose2d) -> None:
     setattr(m, DC_ORIGINAL_FORWARD, m.forward)
     setattr(m, DC_ENABLED, True)
     setattr(m, DC_IS_OUTPUT_LAYER, False)
-    setattr(m, DC_BETA, 1.0)
+    setattr(m, DC_BETA, 0.5)
 
     def patched(x):
         if getattr(m, DC_ENABLED, False):
@@ -139,7 +139,7 @@ def patch_conv_transpose1d(m: nn.ConvTranspose1d) -> None:
     setattr(m, DC_ORIGINAL_FORWARD, m.forward)
     setattr(m, DC_ENABLED, True)
     setattr(m, DC_IS_OUTPUT_LAYER, False)
-    setattr(m, DC_BETA, 1.0)
+    setattr(m, DC_BETA, 0.5)
 
     def patched(x):
         if getattr(m, DC_ENABLED, False):

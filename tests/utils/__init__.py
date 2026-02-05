@@ -31,7 +31,6 @@ from .dc_tester import (
     DEFAULT_FWD_REL_TOL,
     DEFAULT_BWD_ABS_TOL,
     DEFAULT_BWD_REL_TOL,
-    DEFAULT_SUM_CHECK_TOL,
 
     # Helper
     check_pass,
@@ -49,6 +48,5 @@ __all__ = [
     'DEFAULT_FWD_REL_TOL',
     'DEFAULT_BWD_ABS_TOL',
     'DEFAULT_BWD_REL_TOL',
-    'DEFAULT_SUM_CHECK_TOL',
     'check_pass',
 ]

@@ -14,20 +14,15 @@ Two APIs are provided:
     out_cat = model(x_cat)
     out = reconstruct_output(out_cat)
 
-2. HookDecomposer API (for advanced use cases):
-    from dc_decompose import HookDecomposer, InputMode
+For backward compatibility, import the core utilities:
+    from dc_decompose.operations.base import InputMode
 
-    decomposer = HookDecomposer(model)
-    decomposer.initialize(x)
-    output = model(x)
-    decomposer.backward()
-
-Forward format: [4*batch] = [pos; neg; pos; neg]
+Forward format: [4*batch] = [pos; neg; 0; 0]
 Backward format: [4*batch] = [delta_pp; delta_np; delta_pn; delta_nn]
 """
 
-# Hook-based decomposer
-from .hook_decomposer import HookDecomposer, InputMode, BackwardMode, ReLUMode, DCCache
+# Backward compatibility - legacy enums now in operations.base
+# ReLUMode and BackwardMode were part of the old HookDecomposer
 
 # Patcher-based API (model-level)
 from .patcher import (
@@ -48,12 +43,16 @@ from .operations.base import (
 )
 
 # Matrix operations
-from .dc_matmul import DCMatMul, DCMatMulFunction
-from .dc_operations import (
-    DCReshape, DCDynamicReshape, DCPermute, DCTranspose, DCContiguous,
-    DCScalarMul, DCScalarDiv, DCAdd, DCSplit, DCChunk, DCCat, DCSlice,
-    DCDropout, DCIdentity, DCEmbedding, DCGather, DCMean, DCSum,
-)
+from .operations.matmul import DCMatMul, DCMatMulFunction
+
+# Operations
+from .operations.tensor_ops import DCSplit, DCChunk, DCCat, DCSlice
+from .operations.shape_ops import Reshape as DCReshape, Transpose as DCTranspose, Permute as DCPermute
+from .operations.add import Add as DCAdd
+from .operations.gather import Gather as DCGather
+from .operations.mean import Mean as DCMean
+from .operations.sum import Sum as DCSum
+from .operations.contiguous import Contiguous as DCContiguous
 
 __all__ = [
     # Patcher API (recommended)
@@ -78,11 +77,6 @@ __all__ = [
     "reconstruct_output",
     "recenter_dc",
     "InputMode",
-    # Hook-based API
-    "HookDecomposer",
-    "BackwardMode",
-    "ReLUMode",
-    "DCCache",
     # Functional replacer modules
     "Mul",
     "Mean",
@@ -91,20 +85,14 @@ __all__ = [
     "DCMatMulFunction",
     # Operations
     "DCReshape",
-    "DCDynamicReshape",
-    "DCPermute",
+    "DCPermute", 
     "DCTranspose",
     "DCContiguous",
-    "DCScalarMul",
-    "DCScalarDiv",
     "DCAdd",
     "DCSplit",
     "DCChunk",
-    "DCCat",
+    "DCCat", 
     "DCSlice",
-    "DCDropout",
-    "DCIdentity",
-    "DCEmbedding",
     "DCGather",
     "DCMean",
     "DCSum",

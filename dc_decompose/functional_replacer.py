@@ -15,8 +15,11 @@ from typing import Dict, Any, Optional, Tuple, Set
 
 from .operations.add import Add
 from .operations.shape_ops import Reshape, View, Squeeze, Unsqueeze, Transpose, Permute
+from .operations.matmul import DCMatMul
+from .operations.mul import DCMul
 from .operations.base import DC_ENABLED, DC_ORIGINAL_FORWARD, DC_IS_OUTPUT_LAYER, DC_BETA
 from .operations.base import split_input_4, make_output_4, split_grad_4, make_grad_4
+from .inline_module_replacer import replace_inline_modules
 
 
 class LeafModuleTracer(Tracer):
@@ -63,7 +66,10 @@ def replace_functional_with_modules(model: nn.Module, inplace: bool = False) -> 
         import copy
         model = copy.deepcopy(model)
 
-    # First, duplicate any modules used multiple times
+    # First, replace inline modules (nn.Dropout()(x) -> self.dropout_0(x))
+    replace_inline_modules(model, inplace=True)
+
+    # Then, duplicate any modules used multiple times
     _duplicate_shared_modules(model)
 
     # Replace functional calls in all submodules recursively
@@ -136,6 +142,7 @@ def _transform_module_forward(module: nn.Module, processed: set = None) -> None:
         nn.ReLU, nn.GELU, nn.Sigmoid, nn.Tanh, nn.Softmax,
         nn.Flatten, nn.Unflatten,
         Add, Reshape, View, Squeeze, Unsqueeze, Transpose, Permute,
+        DCMatMul, DCMul,
     )
     if isinstance(module, skip_types):
         return
@@ -155,7 +162,7 @@ def _transform_module_forward(module: nn.Module, processed: set = None) -> None:
     new_modules: Dict[str, nn.Module] = {}
     counter = {
         'relu': 0, 'gelu': 0, 'sigmoid': 0, 'tanh': 0, 'softmax': 0, 'add': 0,
-        'mul': 0, 'mean': 0,
+        'mul': 0, 'mean': 0, 'matmul': 0,
         'flatten': 0, 'reshape': 0, 'view': 0, 'squeeze': 0, 'unsqueeze': 0,
         'transpose': 0, 'permute': 0
     }
@@ -255,8 +262,14 @@ def _get_module_replacement(node: Node, counter: Dict[str, int], new_modules: Di
     if func in (operator.mul, torch.mul):
         name = f'_dc_mul_{counter["mul"]}'
         counter['mul'] += 1
-        new_modules[name] = Mul()
+        new_modules[name] = DCMul()
         return name, True
+
+    if func == torch.matmul:
+        name = f'_dc_matmul_{counter["matmul"]}'
+        counter['matmul'] += 1
+        new_modules[name] = DCMatMul()
+        return name, True  # Keep both arguments for torch.matmul(A, B)
 
     if func in (torch.mean,):
         name = f'_dc_mean_{counter["mean"]}'
@@ -550,7 +563,7 @@ def dc_forward_mul(m: Mul, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     return DCMulFunction.apply(
         x, y,
         getattr(m, DC_IS_OUTPUT_LAYER, False),
-        getattr(m, DC_BETA, 1.0)
+        getattr(m, DC_BETA, 0.5)
     )
 
 
@@ -561,7 +574,7 @@ def patch_mul(module: Mul) -> None:
     setattr(module, DC_ORIGINAL_FORWARD, module.forward)
     setattr(module, DC_ENABLED, True)
     setattr(module, DC_IS_OUTPUT_LAYER, False)
-    setattr(module, DC_BETA, 1.0)
+    setattr(module, DC_BETA, 0.5)
 
     def patched(x, y):
         if getattr(module, DC_ENABLED, False):
@@ -586,7 +599,7 @@ def dc_forward_mean(m: Mean, x: torch.Tensor) -> torch.Tensor:
     return DCMeanFunction.apply(
         x, m.dim, m.keepdim,
         getattr(m, DC_IS_OUTPUT_LAYER, False),
-        getattr(m, DC_BETA, 1.0)
+        getattr(m, DC_BETA, 0.5)
     )
 
 
@@ -597,7 +610,7 @@ def patch_mean(module: Mean) -> None:
     setattr(module, DC_ORIGINAL_FORWARD, module.forward)
     setattr(module, DC_ENABLED, True)
     setattr(module, DC_IS_OUTPUT_LAYER, False)
-    setattr(module, DC_BETA, 1.0)
+    setattr(module, DC_BETA, 0.5)
 
     def patched(x):
         if getattr(module, DC_ENABLED, False):

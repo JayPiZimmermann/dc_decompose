@@ -80,7 +80,7 @@ def patch_avgpool2d(module: nn.AvgPool2d) -> None:
     setattr(module, DC_ORIGINAL_FORWARD, module.forward)
     setattr(module, DC_ENABLED, True)
     setattr(module, DC_IS_OUTPUT_LAYER, False)
-    setattr(module, DC_BETA, 1.0)
+    setattr(module, DC_BETA, 0.5)
 
     def patched(x):
         if getattr(module, DC_ENABLED, False):
@@ -96,7 +96,7 @@ def patch_avgpool1d(module: nn.AvgPool1d) -> None:
     setattr(module, DC_ORIGINAL_FORWARD, module.forward)
     setattr(module, DC_ENABLED, True)
     setattr(module, DC_IS_OUTPUT_LAYER, False)
-    setattr(module, DC_BETA, 1.0)
+    setattr(module, DC_BETA, 0.5)
 
     def patched(x):
         if getattr(module, DC_ENABLED, False):
@@ -112,7 +112,7 @@ def patch_adaptive_avgpool2d(module: nn.AdaptiveAvgPool2d) -> None:
     setattr(module, DC_ORIGINAL_FORWARD, module.forward)
     setattr(module, DC_ENABLED, True)
     setattr(module, DC_IS_OUTPUT_LAYER, False)
-    setattr(module, DC_BETA, 1.0)
+    setattr(module, DC_BETA, 0.5)
 
     def patched(x):
         if getattr(module, DC_ENABLED, False):
@@ -128,7 +128,7 @@ def patch_adaptive_avgpool1d(module: nn.AdaptiveAvgPool1d) -> None:
     setattr(module, DC_ORIGINAL_FORWARD, module.forward)
     setattr(module, DC_ENABLED, True)
     setattr(module, DC_IS_OUTPUT_LAYER, False)
-    setattr(module, DC_BETA, 1.0)
+    setattr(module, DC_BETA, 0.5)
 
     def patched(x):
         if getattr(module, DC_ENABLED, False):

@@ -58,7 +58,7 @@ def patch_add(module: Add) -> None:
     setattr(module, DC_ORIGINAL_FORWARD, module.forward)
     setattr(module, DC_ENABLED, True)
     setattr(module, DC_IS_OUTPUT_LAYER, False)
-    setattr(module, DC_BETA, 1.0)
+    setattr(module, DC_BETA, 0.5)
 
     def patched(x, y):
         if getattr(module, DC_ENABLED, False):

@@ -1,7 +1,7 @@
 """
 DC Decomposition Operations Module
 
-Forward: [4*batch] = [pos; neg; pos; neg]
+Forward: [4*batch] = [pos; neg; 0; 0]
 Backward: [4*batch] = [delta_pp; delta_np; delta_pn; delta_nn]
 
 This module contains layer-level DC operations (linear, conv, relu, etc.).
@@ -13,7 +13,7 @@ from .base import (
     cat2, split2, cat4, split4,
     init_catted, init_pos_neg, InputMode,
     ReLUMode, DCCache, recenter_dc, reconstruct_output,
-    DC_ENABLED, DC_ORIGINAL_FORWARD, DC_IS_OUTPUT_LAYER, DC_BETA, DC_RELU_MODE,
+    DC_ENABLED, DC_ORIGINAL_FORWARD, DC_IS_OUTPUT_LAYER, DC_BETA, DC_RELU_MODE, DC_SPLIT_WEIGHTS_ON_FLY,
     split_input_4, make_output_4, split_grad_4, make_grad_4, make_input_4,
     # Sensitivity utilities
     Sensitivities, extract_sensitivities,
@@ -61,13 +61,21 @@ from .shape_ops import (
 )
 from .layernorm import patch_layernorm, unpatch_layernorm
 from .softmax import patch_softmax, unpatch_softmax
+from .tensor_ops import (
+    DCSplit, DCChunk, DCCat, DCSlice
+)
+from .embedding import patch_embedding, unpatch_embedding
+from .gather import Gather, patch_gather, unpatch_gather
+from .mean import Mean, patch_mean, unpatch_mean
+from .sum import Sum, patch_sum, unpatch_sum
+from .contiguous import Contiguous, patch_contiguous, unpatch_contiguous
 
 __all__ = [
     # Base
     'cat2', 'split2', 'cat4', 'split4',
     'init_catted', 'init_pos_neg', 'InputMode',
     'ReLUMode', 'DCCache', 'recenter_dc', 'reconstruct_output',
-    'DC_ENABLED', 'DC_ORIGINAL_FORWARD', 'DC_IS_OUTPUT_LAYER', 'DC_BETA', 'DC_RELU_MODE',
+    'DC_ENABLED', 'DC_ORIGINAL_FORWARD', 'DC_IS_OUTPUT_LAYER', 'DC_BETA', 'DC_RELU_MODE', 'DC_SPLIT_WEIGHTS_ON_FLY',
     'split_input_4', 'make_output_4', 'split_grad_4', 'make_grad_4', 'make_input_4',
     # Sensitivity utilities
     'Sensitivities', 'extract_sensitivities',
@@ -113,4 +121,12 @@ __all__ = [
     'patch_layernorm', 'unpatch_layernorm',
     # Softmax
     'patch_softmax', 'unpatch_softmax',
+    # Tensor ops
+    'DCSplit', 'DCChunk', 'DCCat', 'DCSlice',
+    # Individual patches
+    'patch_embedding', 'unpatch_embedding',
+    'Gather', 'patch_gather', 'unpatch_gather', 
+    'Mean', 'patch_mean', 'unpatch_mean',
+    'Sum', 'patch_sum', 'unpatch_sum',
+    'Contiguous', 'patch_contiguous', 'unpatch_contiguous',
 ]

@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
-from .hook_decomposer import DCCache
+# Removed DCCache dependency - was part of deprecated HookDecomposer
 
 
 def split_input(x: Tensor, beta: float = 1.0) -> Tuple[Tensor, Tensor]:
@@ -147,51 +147,12 @@ def verify_monotonicity(pos: Tensor, neg: Tensor, tolerance: float = 1e-6) -> bo
     return (pos >= -tolerance).all() and (neg >= -tolerance).all()
 
 
-def compute_stream_norms(caches: Dict[str, DCCache]) -> Dict[str, Dict[str, float]]:
-    """
-    Compute norms of pos and neg streams for all layers.
-
-    Args:
-        caches: Dictionary of layer caches from HookDecomposer
-
-    Returns:
-        Dictionary mapping layer names to their stream norms
-    """
-    result = {}
-    for name, cache in caches.items():
-        if cache.output_pos is not None:
-            result[name] = {
-                "pos_norm": cache.output_pos.norm().item(),
-                "neg_norm": cache.output_neg.norm().item(),
-                "ratio": (cache.output_pos.norm() / (cache.output_neg.norm() + 1e-8)).item(),
-            }
-    return result
-
-
-def compute_sensitivity_norms(caches: Dict[str, DCCache]) -> Dict[str, Dict[str, float]]:
-    """
-    Compute norms of all 4 sensitivities for all layers.
-
-    Args:
-        caches: Dictionary of layer caches from HookDecomposer
-
-    Returns:
-        Dictionary mapping layer names to their sensitivity norms
-    """
-    result = {}
-    for name, cache in caches.items():
-        if cache.delta_pp is not None:
-            combined = compute_gradient_from_sensitivities(
-                cache.delta_pp, cache.delta_np, cache.delta_pn, cache.delta_nn
-            )
-            result[name] = {
-                "delta_pp_norm": cache.delta_pp.norm().item(),
-                "delta_np_norm": cache.delta_np.norm().item(),
-                "delta_pn_norm": cache.delta_pn.norm().item(),
-                "delta_nn_norm": cache.delta_nn.norm().item(),
-                "combined_grad_norm": combined.norm().item(),
-            }
-    return result
+# The following functions were removed as they depend on the deprecated HookDecomposer DCCache:
+# - compute_stream_norms()
+# - compute_sensitivity_norms()
+#
+# For the current patcher API, use dc_decompose.operations.base.extract_sensitivities()
+# to get sensitivities from gradient tensors.
 
 
 def find_supported_layers(model: nn.Module) -> Dict[str, type]:

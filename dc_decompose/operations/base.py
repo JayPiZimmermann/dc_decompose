@@ -2,7 +2,7 @@
 Base utilities for DC decomposition.
 
 Both forward and backward use [4*batch, ...] format for autograd compatibility:
-- Forward input: [pos; neg; pos; neg] (last two are duplicates)
+- Forward input: [pos; neg; 0; 0] (last two are zero)
 - Forward output: [out_pos; out_neg; out_pos; out_neg]
 - Backward: [delta_pp; delta_np; delta_pn; delta_nn]
 
@@ -35,6 +35,7 @@ DC_ORIGINAL_FORWARD = '_dc_original_forward'
 DC_RELU_MODE = '_dc_relu_mode'
 DC_IS_OUTPUT_LAYER = '_dc_is_output_layer'
 DC_BETA = '_dc_beta'
+DC_SPLIT_WEIGHTS_ON_FLY = '_dc_split_weights_on_fly'
 
 
 # =============================================================================
@@ -58,11 +59,11 @@ def get_batch_size(catted: Tensor) -> int:
 
 
 # =============================================================================
-# Forward: create [4*batch] = [pos; neg; pos; neg]
+# Forward: create [4*batch] = [pos; neg; 0; 0]
 # =============================================================================
 
 def make_input_4(pos: Tensor, neg: Tensor) -> Tensor:
-    """Create [4*batch] forward input: [pos; neg; pos; neg] (duplicated)."""
+    """Create [4*batch] forward input: [pos; neg; 0; 0] (with zeros)."""
     return torch.cat([pos, neg, pos, neg], dim=0)
 
 
@@ -161,7 +162,7 @@ def recenter_forward(output_4: Tensor) -> Tensor:
     """
     Re-center forward output for numerical stability.
 
-    Converts [pos; neg; pos; neg] to canonical form where one of pos/neg
+    Converts [pos; neg; 0; 0] to canonical form where one of pos/neg
     is zero for each element, minimizing magnitudes.
 
     Uses in-place data modification to not affect autograd graph.
@@ -226,7 +227,7 @@ def init_pos_neg(x: Tensor, mode: InputMode = InputMode.CENTER) -> Tuple[Tensor,
 
 def init_catted(x: Tensor, mode: InputMode = InputMode.CENTER) -> Tensor:
     """
-    Initialize [4*batch] input for DC forward: [pos; neg; pos; neg].
+    Initialize [4*batch] input for DC forward: [pos; neg; 0; 0].
 
     This is a PREPROCESSING step that is DETACHED from autograd.
     The returned tensor has requires_grad=True so that backward pass
@@ -254,7 +255,7 @@ def init_catted(x: Tensor, mode: InputMode = InputMode.CENTER) -> Tensor:
             pos = torch.zeros_like(x)
             neg = -x
 
-        result = torch.cat([pos, neg, pos, neg], dim=0)
+        result = torch.cat([pos, neg, torch.zeros_like(pos), torch.zeros_like(neg)], dim=0)
 
     # Enable gradient tracking on the result (detached from x)
     result.requires_grad_(True)
@@ -285,7 +286,7 @@ class ReconstructOutputFunction(torch.autograd.Function):
     """
     Reconstruct output from DC format and initialize sensitivities.
 
-    Forward: [pos; neg; pos; neg] -> pos - neg
+    Forward: [pos; neg; 0; 0] -> pos - neg
     Backward: Initializes 4-sensitivities with beta weighting:
         - delta_pp = beta * g
         - delta_np = 0
@@ -323,7 +324,7 @@ def reconstruct_output(output_4: Tensor, beta: float = 1.0) -> Tensor:
     """Reconstruct original output from [4*batch]: out_pos - out_neg.
 
     Args:
-        output_4: DC format tensor [pos; neg; pos; neg]
+        output_4: DC format tensor [pos; neg; 0; 0]
         beta: Sensitivity initialization weight (default 1.0).
               Backward pass initializes: delta_pp = beta*g, delta_pn = -(1-beta)*g
     """
@@ -384,7 +385,7 @@ def recenter_dc(tensor_4: Tensor) -> Tensor:
     """
     Re-center DC representation to minimize pos and neg magnitudes.
 
-    Given [pos; neg; pos; neg] where z = pos - neg:
+    Given [pos; neg; 0; 0] where z = pos - neg:
     - Computes new_pos = ReLU(z), new_neg = ReLU(-z)
     - Returns [new_pos; new_neg; new_pos; new_neg]
 

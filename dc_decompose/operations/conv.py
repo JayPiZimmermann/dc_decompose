@@ -9,7 +9,7 @@ from typing import Optional, Tuple
 from .base import (
     split_input_4, make_output_4, make_grad_4,
     init_backward, recenter_forward,
-    DC_ENABLED, DC_ORIGINAL_FORWARD, DC_IS_OUTPUT_LAYER, DC_BETA
+    DC_ENABLED, DC_ORIGINAL_FORWARD, DC_IS_OUTPUT_LAYER, DC_BETA, DC_SPLIT_WEIGHTS_ON_FLY
 )
 
 
@@ -21,9 +21,10 @@ class DCConv1dFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, input_4: Tensor, weight: Tensor, bias: Optional[Tensor],
-                stride, padding, dilation, groups, is_output_layer: bool, beta: float) -> Tensor:
+                stride, padding, dilation, groups, is_output_layer: bool, beta: float, split_on_fly: bool) -> Tensor:
         pos, neg = split_input_4(input_4)
 
+        # Split weights on-the-fly (temporary tensors, auto-cleanup)
         weight_pos = F.relu(weight)
         weight_neg = F.relu(-weight)
 
@@ -36,9 +37,15 @@ class DCConv1dFunction(torch.autograd.Function):
             out_pos = out_pos + F.relu(bias).view(1, -1, 1)
             out_neg = out_neg + F.relu(-bias).view(1, -1, 1)
 
-        ctx.save_for_backward(weight_pos, weight_neg)
+        # Save for backward: only save original weight if split_on_fly=True
+        if split_on_fly:
+            ctx.save_for_backward(weight)
+        else:
+            ctx.save_for_backward(weight_pos, weight_neg)
+            
         ctx.stride, ctx.padding, ctx.dilation, ctx.groups = stride, padding, dilation, groups
         ctx.is_output_layer, ctx.beta = is_output_layer, beta
+        ctx.split_on_fly = split_on_fly
         ctx.input_shape = pos.shape
 
         output = make_output_4(out_pos, out_neg)
@@ -46,10 +53,19 @@ class DCConv1dFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_4: Tensor):
-        weight_pos, weight_neg = ctx.saved_tensors
-
         delta_pp, delta_np, delta_pn, delta_nn = init_backward(
             grad_4, ctx.is_output_layer, ctx.beta)
+
+        if ctx.split_on_fly:
+            # Split weights on-the-fly in backward
+            weight, = ctx.saved_tensors
+            
+            # Split on-the-fly (temporary tensors, auto-cleanup)
+            weight_pos = F.relu(weight)
+            weight_neg = F.relu(-weight)
+        else:
+            # Use pre-computed split weights
+            weight_pos, weight_neg = ctx.saved_tensors
 
         # output_padding for conv_transpose1d
         out_pad = 0
@@ -68,12 +84,13 @@ class DCConv1dFunction(torch.autograd.Function):
         new_pn = conv_t(delta_pn, weight_pos) + conv_t(delta_nn, weight_neg)
         new_nn = conv_t(delta_pn, weight_neg) + conv_t(delta_nn, weight_pos)
 
-        return make_grad_4(new_pp, new_np, new_pn, new_nn), None, None, None, None, None, None, None, None
+        return make_grad_4(new_pp, new_np, new_pn, new_nn), None, None, None, None, None, None, None, None, None
 
 
 def dc_forward_conv1d(m: nn.Conv1d, x: Tensor) -> Tensor:
+    split_on_fly = getattr(m, DC_SPLIT_WEIGHTS_ON_FLY, True)
     return DCConv1dFunction.apply(x, m.weight, m.bias, m.stride[0], m.padding[0], m.dilation[0], m.groups,
-                                   getattr(m, DC_IS_OUTPUT_LAYER, False), getattr(m, DC_BETA, 1.0))
+                                   getattr(m, DC_IS_OUTPUT_LAYER, False), getattr(m, DC_BETA, 0.5), split_on_fly)
 
 
 def patch_conv1d(m: nn.Conv1d) -> None:
@@ -81,7 +98,8 @@ def patch_conv1d(m: nn.Conv1d) -> None:
     setattr(m, DC_ORIGINAL_FORWARD, m.forward)
     setattr(m, DC_ENABLED, True)
     setattr(m, DC_IS_OUTPUT_LAYER, False)
-    setattr(m, DC_BETA, 1.0)
+    setattr(m, DC_BETA, 0.5)
+    setattr(m, DC_SPLIT_WEIGHTS_ON_FLY, True)
 
     def patched(x):
         if getattr(m, DC_ENABLED, False):
@@ -95,7 +113,7 @@ def patch_conv1d(m: nn.Conv1d) -> None:
 def unpatch_conv1d(m: nn.Conv1d) -> None:
     if hasattr(m, DC_ORIGINAL_FORWARD):
         m.forward = getattr(m, DC_ORIGINAL_FORWARD)
-        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER, DC_BETA]:
+        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER, DC_BETA, DC_SPLIT_WEIGHTS_ON_FLY]:
             if hasattr(m, a): delattr(m, a)
 
 
@@ -107,9 +125,10 @@ class DCConv2dFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, input_4: Tensor, weight: Tensor, bias: Optional[Tensor],
-                stride, padding, dilation, groups, is_output_layer: bool, beta: float) -> Tensor:
+                stride, padding, dilation, groups, is_output_layer: bool, beta: float, split_on_fly: bool) -> Tensor:
         pos, neg = split_input_4(input_4)
 
+        # Split weights on-the-fly (temporary tensors, auto-cleanup)
         weight_pos = F.relu(weight)
         weight_neg = F.relu(-weight)
 
@@ -122,9 +141,15 @@ class DCConv2dFunction(torch.autograd.Function):
             out_pos = out_pos + F.relu(bias).view(1, -1, 1, 1)
             out_neg = out_neg + F.relu(-bias).view(1, -1, 1, 1)
 
-        ctx.save_for_backward(weight_pos, weight_neg)
+        # Save for backward: only save original weight if split_on_fly=True
+        if split_on_fly:
+            ctx.save_for_backward(weight)
+        else:
+            ctx.save_for_backward(weight_pos, weight_neg)
+            
         ctx.stride, ctx.padding, ctx.dilation, ctx.groups = stride, padding, dilation, groups
         ctx.is_output_layer, ctx.beta = is_output_layer, beta
+        ctx.split_on_fly = split_on_fly
         ctx.input_shape = pos.shape
 
         output = make_output_4(out_pos, out_neg)
@@ -132,10 +157,19 @@ class DCConv2dFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_4: Tensor):
-        weight_pos, weight_neg = ctx.saved_tensors
-
         delta_pp, delta_np, delta_pn, delta_nn = init_backward(
             grad_4, ctx.is_output_layer, ctx.beta)
+
+        if ctx.split_on_fly:
+            # Split weights on-the-fly in backward
+            weight, = ctx.saved_tensors
+            
+            # Split on-the-fly (temporary tensors, auto-cleanup)
+            weight_pos = F.relu(weight)
+            weight_neg = F.relu(-weight)
+        else:
+            # Use pre-computed split weights
+            weight_pos, weight_neg = ctx.saved_tensors
 
         # output_padding for conv_transpose2d
         out_pad = (0, 0)
@@ -155,12 +189,13 @@ class DCConv2dFunction(torch.autograd.Function):
         new_pn = conv_t(delta_pn, weight_pos) + conv_t(delta_nn, weight_neg)
         new_nn = conv_t(delta_pn, weight_neg) + conv_t(delta_nn, weight_pos)
 
-        return make_grad_4(new_pp, new_np, new_pn, new_nn), None, None, None, None, None, None, None, None
+        return make_grad_4(new_pp, new_np, new_pn, new_nn), None, None, None, None, None, None, None, None, None
 
 
 def dc_forward_conv2d(m: nn.Conv2d, x: Tensor) -> Tensor:
+    split_on_fly = getattr(m, DC_SPLIT_WEIGHTS_ON_FLY, True)
     return DCConv2dFunction.apply(x, m.weight, m.bias, m.stride, m.padding, m.dilation, m.groups,
-                                   getattr(m, DC_IS_OUTPUT_LAYER, False), getattr(m, DC_BETA, 1.0))
+                                   getattr(m, DC_IS_OUTPUT_LAYER, False), getattr(m, DC_BETA, 0.5), split_on_fly)
 
 
 def patch_conv2d(m: nn.Conv2d) -> None:
@@ -168,7 +203,8 @@ def patch_conv2d(m: nn.Conv2d) -> None:
     setattr(m, DC_ORIGINAL_FORWARD, m.forward)
     setattr(m, DC_ENABLED, True)
     setattr(m, DC_IS_OUTPUT_LAYER, False)
-    setattr(m, DC_BETA, 1.0)
+    setattr(m, DC_BETA, 0.5)
+    setattr(m, DC_SPLIT_WEIGHTS_ON_FLY, True)
 
     def patched(x):
         if getattr(m, DC_ENABLED, False):
@@ -182,5 +218,5 @@ def patch_conv2d(m: nn.Conv2d) -> None:
 def unpatch_conv2d(m: nn.Conv2d) -> None:
     if hasattr(m, DC_ORIGINAL_FORWARD):
         m.forward = getattr(m, DC_ORIGINAL_FORWARD)
-        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER, DC_BETA]:
+        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER, DC_BETA, DC_SPLIT_WEIGHTS_ON_FLY]:
             if hasattr(m, a): delattr(m, a)

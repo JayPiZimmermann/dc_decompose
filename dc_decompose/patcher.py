@@ -46,6 +46,8 @@ from .operations.shape_ops import (
 )
 from .operations.layernorm import patch_layernorm, unpatch_layernorm
 from .operations.softmax import patch_softmax, unpatch_softmax
+from .operations.matmul import DCMatMul, patch_dcmatmul, unpatch_dcmatmul
+from .operations.mul import DCMul, patch_dcmul, unpatch_dcmul
 
 
 # Forward declaration for Mul and Mean (defined in functional_replacer)
@@ -147,6 +149,10 @@ def patch_model(
             patch_layernorm(module)
         elif isinstance(module, nn.Softmax):
             patch_softmax(module)
+        elif isinstance(module, DCMatMul):
+            patch_dcmatmul(module)
+        elif isinstance(module, DCMul):
+            patch_dcmul(module)
 
 
 def unpatch_model(model: nn.Module) -> None:
@@ -209,6 +215,10 @@ def unpatch_model(model: nn.Module) -> None:
             unpatch_layernorm(module)
         elif isinstance(module, nn.Softmax):
             unpatch_softmax(module)
+        elif isinstance(module, DCMatMul):
+            unpatch_dcmatmul(module)
+        elif isinstance(module, DCMul):
+            unpatch_dcmul(module)
 
 
 def mark_output_layer(module: nn.Module, beta: float = 1.0) -> None:

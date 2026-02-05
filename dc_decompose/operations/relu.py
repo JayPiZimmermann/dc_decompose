@@ -188,7 +188,7 @@ def dc_forward_relu(m: nn.ReLU, x: Tensor) -> Tensor:
     return func.apply(
         x,
         getattr(m, DC_IS_OUTPUT_LAYER, False),
-        getattr(m, DC_BETA, 1.0)
+        getattr(m, DC_BETA, 0.5)
     )
 
 
@@ -200,7 +200,7 @@ def patch_relu(m: nn.ReLU, split_mode: str = 'max', backprop_mode: str = 'standa
     setattr(m, DC_BACKPROP_MODE, backprop_mode)
     setattr(m, DC_RELU_FUNCTION, _make_relu_function(split_mode, backprop_mode))
     setattr(m, DC_IS_OUTPUT_LAYER, False)
-    setattr(m, DC_BETA, 1.0)
+    setattr(m, DC_BETA, 0.5)
 
     def patched(x):
         if getattr(m, DC_ENABLED, False):

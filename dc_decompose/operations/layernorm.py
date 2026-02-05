@@ -111,7 +111,7 @@ def dc_forward_layernorm(module: nn.LayerNorm, x: Tensor) -> Tensor:
         x, list(module.normalized_shape),
         module.weight, module.bias, module.eps,
         getattr(module, DC_IS_OUTPUT_LAYER, False),
-        getattr(module, DC_BETA, 1.0)
+        getattr(module, DC_BETA, 0.5)
     )
 
 
@@ -121,7 +121,7 @@ def patch_layernorm(module: nn.LayerNorm) -> None:
     setattr(module, DC_ORIGINAL_FORWARD, module.forward)
     setattr(module, DC_ENABLED, True)
     setattr(module, DC_IS_OUTPUT_LAYER, False)
-    setattr(module, DC_BETA, 1.0)
+    setattr(module, DC_BETA, 0.5)
 
     def patched(x):
         if getattr(module, DC_ENABLED, False):

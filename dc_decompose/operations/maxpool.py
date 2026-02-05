@@ -129,13 +129,13 @@ def dc_forward_maxpool2d(module: nn.MaxPool2d, x: Tensor) -> Tensor:
     stride = module.stride if isinstance(module.stride, tuple) else (module.stride, module.stride)
     padding = module.padding if isinstance(module.padding, tuple) else (module.padding, module.padding)
     return DCMaxPool2dFunction.apply(x, kernel_size, stride, padding,
-                                      getattr(module, DC_IS_OUTPUT_LAYER, False), getattr(module, DC_BETA, 1.0))
+                                      getattr(module, DC_IS_OUTPUT_LAYER, False), getattr(module, DC_BETA, 0.5))
 
 
 def dc_forward_maxpool1d(module: nn.MaxPool1d, x: Tensor) -> Tensor:
     stride = module.stride if module.stride is not None else module.kernel_size
     return DCMaxPool1dFunction.apply(x, module.kernel_size, stride, module.padding,
-                                      getattr(module, DC_IS_OUTPUT_LAYER, False), getattr(module, DC_BETA, 1.0))
+                                      getattr(module, DC_IS_OUTPUT_LAYER, False), getattr(module, DC_BETA, 0.5))
 
 
 def patch_maxpool2d(module: nn.MaxPool2d) -> None:
@@ -143,7 +143,7 @@ def patch_maxpool2d(module: nn.MaxPool2d) -> None:
     setattr(module, DC_ORIGINAL_FORWARD, module.forward)
     setattr(module, DC_ENABLED, True)
     setattr(module, DC_IS_OUTPUT_LAYER, False)
-    setattr(module, DC_BETA, 1.0)
+    setattr(module, DC_BETA, 0.5)
 
     def patched(x):
         if getattr(module, DC_ENABLED, False):
@@ -159,7 +159,7 @@ def patch_maxpool1d(module: nn.MaxPool1d) -> None:
     setattr(module, DC_ORIGINAL_FORWARD, module.forward)
     setattr(module, DC_ENABLED, True)
     setattr(module, DC_IS_OUTPUT_LAYER, False)
-    setattr(module, DC_BETA, 1.0)
+    setattr(module, DC_BETA, 0.5)
 
     def patched(x):
         if getattr(module, DC_ENABLED, False):

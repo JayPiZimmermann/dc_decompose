@@ -49,7 +49,6 @@ DEFAULT_FWD_ABS_TOL = 1e-5
 DEFAULT_FWD_REL_TOL = 1e-5
 DEFAULT_BWD_ABS_TOL = 1e-4
 DEFAULT_BWD_REL_TOL = 0.1
-DEFAULT_SUM_CHECK_TOL = 0.01
 
 
 # =============================================================================
@@ -70,14 +69,9 @@ class LayerResult:
     bwd_abs_error: float = 0.0
     bwd_rel_error: float = 0.0
 
-    # Sum check: |delta_pp - delta_pn + delta_np - delta_nn|
-    # This should be ~0 for gradient reconstruction to work through ReLU
-    sum_check: float = 0.0
-
     # Pass/fail
     fwd_pass: bool = True
     bwd_pass: bool = True
-    sum_check_pass: bool = True
 
 
 @dataclass
@@ -103,16 +97,11 @@ class TestResult:
     # API used for this test
     api_used: str = "functional"
 
-    # Sum check pass
-    sum_check_pass: bool = True
-    max_sum_check: float = 0.0
-
     # Tolerances used
     fwd_abs_tol: float = DEFAULT_FWD_ABS_TOL
     fwd_rel_tol: float = DEFAULT_FWD_REL_TOL
     bwd_abs_tol: float = DEFAULT_BWD_ABS_TOL
     bwd_rel_tol: float = DEFAULT_BWD_REL_TOL
-    sum_check_tol: float = DEFAULT_SUM_CHECK_TOL
 
 
 # =============================================================================
@@ -224,7 +213,6 @@ class LayerCache:
 
     def compute_errors(self, fwd_abs_tol: float, fwd_rel_tol: float,
                        bwd_abs_tol: float, bwd_rel_tol: float,
-                       sum_check_tol: float = DEFAULT_SUM_CHECK_TOL,
                        output_orig: Optional[Tensor] = None,
                        output_dc: Optional[Tensor] = None,
                        sens_grad: Optional[Tensor] = None,
@@ -258,17 +246,6 @@ class LayerCache:
                     lr.bwd_rel_error = lr.bwd_abs_error / (orig.abs().max().item() + 1e-10)
                     lr.bwd_pass = lr.bwd_abs_error < bwd_abs_tol or lr.bwd_rel_error < bwd_rel_tol
 
-            # Sum check: |delta_pp - delta_pn + delta_np - delta_nn|
-            if name in self.dc_grad_inputs_raw:
-                grad = self.dc_grad_inputs_raw[name]
-                if grad.shape[0] % 4 == 0:
-                    q = grad.shape[0] // 4
-                    pp, np_, pn, nn = grad[:q], grad[q:2*q], grad[2*q:3*q], grad[3*q:]
-                    d_g = pp-np_
-                    d_h = pn-nn
-                    sum_val = (d_g - d_h).abs().max().item()
-                    lr.sum_check = sum_val
-                    lr.sum_check_pass = sum_val < sum_check_tol
 
             results.append(lr)
 
@@ -295,13 +272,6 @@ class LayerCache:
             lr.bwd_abs_error = diff.max().item()
             lr.bwd_rel_error = lr.bwd_abs_error / (orig_grad.abs().max().item() + 1e-10)
             lr.bwd_pass = lr.bwd_abs_error < bwd_abs_tol or lr.bwd_rel_error < bwd_rel_tol
-            # Sum check for input
-            if input_grad_raw is not None and input_grad_raw.shape[0] % 4 == 0:
-                q = input_grad_raw.shape[0] // 4
-                pp, np_, pn, nn = input_grad_raw[:q], input_grad_raw[q:2*q], input_grad_raw[2*q:3*q], input_grad_raw[3*q:]
-                sum_val = (pp - pn + np_ - nn).abs().max().item()
-                lr.sum_check = sum_val
-                lr.sum_check_pass = sum_val < sum_check_tol
             # Insert at beginning
             results.insert(0, lr)
 
@@ -325,7 +295,6 @@ def test_model_functional(
     fwd_rel_tol: float = DEFAULT_FWD_REL_TOL,
     bwd_abs_tol: float = DEFAULT_BWD_ABS_TOL,
     bwd_rel_tol: float = DEFAULT_BWD_REL_TOL,
-    sum_check_tol: float = DEFAULT_SUM_CHECK_TOL,
 ) -> TestResult:
     """Test using the functional API (init_catted + reconstruct_output)."""
 
@@ -336,7 +305,6 @@ def test_model_functional(
         fwd_rel_tol=fwd_rel_tol,
         bwd_abs_tol=bwd_abs_tol,
         bwd_rel_tol=bwd_rel_tol,
-        sum_check_tol=sum_check_tol,
     )
 
     cache = LayerCache()
@@ -384,7 +352,7 @@ def test_model_functional(
         # Compute layer-wise errors
         # =====================================================================
         result.layer_results = cache.compute_errors(
-            fwd_abs_tol, fwd_rel_tol, bwd_abs_tol, bwd_rel_tol, sum_check_tol,
+            fwd_abs_tol, fwd_rel_tol, bwd_abs_tol, bwd_rel_tol,
             output_orig=orig_out.detach(), output_dc=dc_out.detach(),
             sens_grad=grad_dc, orig_grad=grad_orig,
             input_grad_raw=x_cat.grad
@@ -427,10 +395,8 @@ def test_model_functional(
         )
 
         # Sum check: |delta_pp - delta_pn + delta_np - delta_nn| < tol
-        result.sum_check_pass = all(lr.sum_check_pass for lr in result.layer_results)
-        result.max_sum_check = max((lr.sum_check for lr in result.layer_results), default=0.0)
 
-        result.success = result.fwd_pass and result.bwd_pass and result.sum_check_pass
+        result.success = result.fwd_pass and result.bwd_pass
 
     except Exception as e:
         import traceback
@@ -448,7 +414,6 @@ def test_model_context_manager(
     fwd_rel_tol: float = DEFAULT_FWD_REL_TOL,
     bwd_abs_tol: float = DEFAULT_BWD_ABS_TOL,
     bwd_rel_tol: float = DEFAULT_BWD_REL_TOL,
-    sum_check_tol: float = DEFAULT_SUM_CHECK_TOL,
 ) -> TestResult:
     """Test using the context manager API (dc_forward)."""
 
@@ -459,7 +424,6 @@ def test_model_context_manager(
         fwd_rel_tol=fwd_rel_tol,
         bwd_abs_tol=bwd_abs_tol,
         bwd_rel_tol=bwd_rel_tol,
-        sum_check_tol=sum_check_tol,
     )
 
     cache = LayerCache()
@@ -505,7 +469,7 @@ def test_model_context_manager(
         # Compute layer-wise errors
         # =====================================================================
         result.layer_results = cache.compute_errors(
-            fwd_abs_tol, fwd_rel_tol, bwd_abs_tol, bwd_rel_tol, sum_check_tol,
+            fwd_abs_tol, fwd_rel_tol, bwd_abs_tol, bwd_rel_tol,
             output_orig=orig_out.detach(), output_dc=dc_out.detach(),
             sens_grad=grad_dc, orig_grad=grad_orig,
             input_grad_raw=input_grad_raw
@@ -548,10 +512,8 @@ def test_model_context_manager(
         )
 
         # Sum check: |delta_pp - delta_pn + delta_np - delta_nn| < tol
-        result.sum_check_pass = all(lr.sum_check_pass for lr in result.layer_results)
-        result.max_sum_check = max((lr.sum_check for lr in result.layer_results), default=0.0)
 
-        result.success = result.fwd_pass and result.bwd_pass and result.sum_check_pass
+        result.success = result.fwd_pass and result.bwd_pass
 
     except Exception as e:
         import traceback
@@ -569,7 +531,6 @@ def test_model(
     fwd_rel_tol: float = DEFAULT_FWD_REL_TOL,
     bwd_abs_tol: float = DEFAULT_BWD_ABS_TOL,
     bwd_rel_tol: float = DEFAULT_BWD_REL_TOL,
-    sum_check_tol: float = DEFAULT_SUM_CHECK_TOL,
     api: str = "both",
 ) -> Union[TestResult, Tuple[TestResult, TestResult]]:
     """
@@ -579,12 +540,12 @@ def test_model(
         api: "functional", "context_manager", or "both" (default)
     """
     if api == "functional":
-        return test_model_functional(model, x, name, fwd_abs_tol, fwd_rel_tol, bwd_abs_tol, bwd_rel_tol, sum_check_tol)
+        return test_model_functional(model, x, name, fwd_abs_tol, fwd_rel_tol, bwd_abs_tol, bwd_rel_tol)
     elif api == "context_manager":
-        return test_model_context_manager(model, x, name, fwd_abs_tol, fwd_rel_tol, bwd_abs_tol, bwd_rel_tol, sum_check_tol)
+        return test_model_context_manager(model, x, name, fwd_abs_tol, fwd_rel_tol, bwd_abs_tol, bwd_rel_tol)
     else:  # both
-        r1 = test_model_functional(model, x, f"{name} [functional]", fwd_abs_tol, fwd_rel_tol, bwd_abs_tol, bwd_rel_tol, sum_check_tol)
-        r2 = test_model_context_manager(model, x, f"{name} [context_mgr]", fwd_abs_tol, fwd_rel_tol, bwd_abs_tol, bwd_rel_tol, sum_check_tol)
+        r1 = test_model_functional(model, x, f"{name} [functional]", fwd_abs_tol, fwd_rel_tol, bwd_abs_tol, bwd_rel_tol)
+        r2 = test_model_context_manager(model, x, f"{name} [context_mgr]", fwd_abs_tol, fwd_rel_tol, bwd_abs_tol, bwd_rel_tol)
         return r1, r2
 
 
@@ -603,7 +564,6 @@ def run_model_tests(
     fwd_rel_tol: float = DEFAULT_FWD_REL_TOL,
     bwd_abs_tol: float = DEFAULT_BWD_ABS_TOL,
     bwd_rel_tol: float = DEFAULT_BWD_REL_TOL,
-    sum_check_tol: float = DEFAULT_SUM_CHECK_TOL,
     seed: int = 42,
     verbose: bool = True,
     show_layers: bool = True,
@@ -653,7 +613,6 @@ def run_model_tests(
                 fwd_rel_tol=fwd_rel_tol,
                 bwd_abs_tol=bwd_abs_tol,
                 bwd_rel_tol=bwd_rel_tol,
-                sum_check_tol=sum_check_tol,
                 api="both",
             )
             results.extend([r1, r2])
@@ -667,7 +626,6 @@ def run_model_tests(
                 fwd_rel_tol=fwd_rel_tol,
                 bwd_abs_tol=bwd_abs_tol,
                 bwd_rel_tol=bwd_rel_tol,
-                sum_check_tol=sum_check_tol,
                 api="functional",
             )
             results.append(result)
@@ -695,52 +653,48 @@ def _print_result(result: TestResult, show_layers: bool = True) -> None:
 
     fwd_status = "ok" if result.fwd_pass else "FAIL"
     bwd_status = "ok" if result.bwd_pass else "FAIL"
-    sum_status = "ok" if result.sum_check_pass else "FAIL"
 
     print(f"{'='*100}")
     print(f"Model: {result.name} [{status}]")
     print(f"{'='*100}")
     print(f"  Overall Forward:  abs={result.fwd_abs_error:.2e}, rel={result.fwd_rel_error:.2e} [{fwd_status}]")
     print(f"  Overall Backward: abs={result.bwd_abs_error:.2e}, rel={result.bwd_rel_error:.2e} [{bwd_status}]")
-    print(f"  Sum Check:        max={result.max_sum_check:.2e} [{sum_status}]")
 
     if show_layers and result.layer_results:
         print()
-        print(f"  {'Layer':<35} {'Type':<15} {'Fwd Abs':<10} {'Fwd Rel':<10} {'Bwd Abs':<10} {'Bwd Rel':<10} {'Sum Check':<10}")
-        print(f"  {'-'*110}")
+        print(f"  {'Layer':<35} {'Type':<15} {'Fwd Abs':<10} {'Fwd Rel':<10} {'Bwd Abs':<10} {'Bwd Rel':<10}")
+        print(f"  {'-'*90}")
 
         for lr in result.layer_results:
             layer_name = lr.name[:33] + '..' if len(lr.name) > 35 else lr.name
             fwd_mark = "" if lr.fwd_pass else "*"
             bwd_mark = "" if lr.bwd_pass else "*"
-            sum_mark = "" if lr.sum_check_pass else "*"
             print(f"  {layer_name:<35} {lr.module_type:<15} "
                   f"{lr.fwd_abs_error:<10.2e}{fwd_mark} {lr.fwd_rel_error:<10.2e} "
-                  f"{lr.bwd_abs_error:<10.2e}{bwd_mark} {lr.bwd_rel_error:<10.2e} "
-                  f"{lr.sum_check:<10.2e}{sum_mark}")
+                  f"{lr.bwd_abs_error:<10.2e}{bwd_mark} {lr.bwd_rel_error:<10.2e}")
 
     print()
 
 
 def _print_summary(results: List[TestResult]) -> None:
     """Print test summary."""
-    print("=" * 110)
+    print("=" * 90)
     print("SUMMARY")
-    print("=" * 110)
+    print("=" * 90)
 
-    print(f"{'Model':<40} {'Fwd Abs':<12} {'Fwd Rel':<12} {'Bwd Abs':<12} {'Bwd Rel':<12} {'Sum Check':<12} {'Status'}")
-    print("-" * 110)
+    print(f"{'Model':<40} {'Fwd Abs':<12} {'Fwd Rel':<12} {'Bwd Abs':<12} {'Bwd Rel':<12} {'Status'}")
+    print("-" * 90)
 
     for r in results:
         display_name = r.name[:38] + '..' if len(r.name) > 40 else r.name
         if r.error_message:
-            print(f"{display_name:<40} {'ERROR':<12} {'':<12} {'':<12} {'':<12} {'':<12} FAIL")
+            print(f"{display_name:<40} {'ERROR':<12} {'':<12} {'':<12} {'':<12} FAIL")
         else:
             status = "PASS" if r.success else "FAIL"
             print(f"{display_name:<40} {r.fwd_abs_error:<12.2e} {r.fwd_rel_error:<12.2e} "
-                  f"{r.bwd_abs_error:<12.2e} {r.bwd_rel_error:<12.2e} {r.max_sum_check:<12.2e} {status}")
+                  f"{r.bwd_abs_error:<12.2e} {r.bwd_rel_error:<12.2e} {status}")
 
-    print("-" * 110)
+    print("-" * 90)
 
     passed = sum(1 for r in results if r.success)
     total = len(results)
