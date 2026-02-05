@@ -113,30 +113,30 @@ def patch_model(
             patch_maxpool2d(module)
         elif isinstance(module, nn.MaxPool1d):
             patch_maxpool1d(module)
-        elif isinstance(module, nn.AvgPool2d):
-            patch_avgpool2d(module)
-        elif isinstance(module, nn.AvgPool1d):
-            patch_avgpool1d(module)
-        elif isinstance(module, nn.AdaptiveAvgPool2d):
-            patch_adaptive_avgpool2d(module)
-        elif isinstance(module, nn.AdaptiveAvgPool1d):
-            patch_adaptive_avgpool1d(module)
-        elif isinstance(module, nn.Flatten):
-            patch_flatten(module)
-        elif isinstance(module, nn.Unflatten):
-            patch_unflatten(module)
+        # elif isinstance(module, nn.AvgPool2d):
+        #     patch_avgpool2d(module)  # Disabled: linear operation works out of the box
+        # elif isinstance(module, nn.AvgPool1d):
+        #     patch_avgpool1d(module)  # Disabled: linear operation works out of the box
+        # elif isinstance(module, nn.AdaptiveAvgPool2d):
+        #     patch_adaptive_avgpool2d(module)  # Disabled: linear operation works out of the box
+        # elif isinstance(module, nn.AdaptiveAvgPool1d):
+        #     patch_adaptive_avgpool1d(module)  # Disabled: linear operation works out of the box
+        # elif isinstance(module, nn.Flatten):
+        #     patch_flatten(module)  # Disabled: reshaping operation works out of the box
+        # elif isinstance(module, nn.Unflatten):
+        #     patch_unflatten(module)  # Disabled: reshaping operation works out of the box
         elif isinstance(module, nn.Dropout):
             patch_dropout(module)
         elif isinstance(module, Add):
-            patch_add(module)
-        elif isinstance(module, Reshape):
-            patch_reshape(module)
-        elif isinstance(module, View):
-            patch_view(module)
-        elif isinstance(module, Squeeze):
-            patch_squeeze(module)
-        elif isinstance(module, Unsqueeze):
-            patch_unsqueeze(module)
+            patch_add(module)  # Re-enabled: DC-format addition needs special handling
+        # elif isinstance(module, Reshape):
+        #     patch_reshape(module)  # Disabled: reshaping operation works out of the box
+        # elif isinstance(module, View):
+        #     patch_view(module)  # Disabled: reshaping operation works out of the box
+        # elif isinstance(module, Squeeze):
+        #     patch_squeeze(module)  # Disabled: reshaping operation works out of the box
+        # elif isinstance(module, Unsqueeze):
+        #     patch_unsqueeze(module)  # Disabled: reshaping operation works out of the box
         elif isinstance(module, Transpose):
             patch_transpose(module)
         elif isinstance(module, Permute):
@@ -179,30 +179,30 @@ def unpatch_model(model: nn.Module) -> None:
             unpatch_maxpool2d(module)
         elif isinstance(module, nn.MaxPool1d):
             unpatch_maxpool1d(module)
-        elif isinstance(module, nn.AvgPool2d):
-            unpatch_avgpool2d(module)
-        elif isinstance(module, nn.AvgPool1d):
-            unpatch_avgpool1d(module)
-        elif isinstance(module, nn.AdaptiveAvgPool2d):
-            unpatch_adaptive_avgpool2d(module)
-        elif isinstance(module, nn.AdaptiveAvgPool1d):
-            unpatch_adaptive_avgpool1d(module)
-        elif isinstance(module, nn.Flatten):
-            unpatch_flatten(module)
-        elif isinstance(module, nn.Unflatten):
-            unpatch_unflatten(module)
+        # elif isinstance(module, nn.AvgPool2d):
+        #     unpatch_avgpool2d(module)  # Disabled: linear operation works out of the box
+        # elif isinstance(module, nn.AvgPool1d):
+        #     unpatch_avgpool1d(module)  # Disabled: linear operation works out of the box
+        # elif isinstance(module, nn.AdaptiveAvgPool2d):
+        #     unpatch_adaptive_avgpool2d(module)  # Disabled: linear operation works out of the box
+        # elif isinstance(module, nn.AdaptiveAvgPool1d):
+        #     unpatch_adaptive_avgpool1d(module)  # Disabled: linear operation works out of the box
+        # elif isinstance(module, nn.Flatten):
+        #     unpatch_flatten(module)  # Disabled: reshaping operation works out of the box
+        # elif isinstance(module, nn.Unflatten):
+        #     unpatch_unflatten(module)  # Disabled: reshaping operation works out of the box
         elif isinstance(module, nn.Dropout):
             unpatch_dropout(module)
         elif isinstance(module, Add):
-            unpatch_add(module)
-        elif isinstance(module, Reshape):
-            unpatch_reshape(module)
-        elif isinstance(module, View):
-            unpatch_view(module)
-        elif isinstance(module, Squeeze):
-            unpatch_squeeze(module)
-        elif isinstance(module, Unsqueeze):
-            unpatch_unsqueeze(module)
+            unpatch_add(module)  # Re-enabled: DC-format addition needs special handling
+        # elif isinstance(module, Reshape):
+        #     unpatch_reshape(module)  # Disabled: reshaping operation works out of the box
+        # elif isinstance(module, View):
+        #     unpatch_view(module)  # Disabled: reshaping operation works out of the box
+        # elif isinstance(module, Squeeze):
+        #     unpatch_squeeze(module)  # Disabled: reshaping operation works out of the box
+        # elif isinstance(module, Unsqueeze):
+        #     unpatch_unsqueeze(module)  # Disabled: reshaping operation works out of the box
         elif isinstance(module, Transpose):
             unpatch_transpose(module)
         elif isinstance(module, Permute):
@@ -237,7 +237,6 @@ def mark_output_layer(module: nn.Module, beta: float = 1.0) -> None:
         beta: Initialization parameter (default 1.0)
     """
     setattr(module, DC_IS_OUTPUT_LAYER, True)
-    setattr(module, DC_BETA, beta)
 
 
 def unmark_output_layer(module: nn.Module) -> None:

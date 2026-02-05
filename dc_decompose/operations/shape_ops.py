@@ -20,12 +20,12 @@ class DCFlattenFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, input_4: Tensor, start_dim: int, end_dim: int,
-                is_output_layer: bool, beta: float) -> Tensor:
+                is_output_layer: bool) -> Tensor:
         pos, neg = split_input_4(input_4)
 
         ctx.input_shape = pos.shape
         ctx.is_output_layer = is_output_layer
-        ctx.beta = beta
+        
 
         out_pos = torch.flatten(pos, start_dim, end_dim)
         out_neg = torch.flatten(neg, start_dim, end_dim)
@@ -35,7 +35,7 @@ class DCFlattenFunction(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_4: Tensor) -> Tuple[Tensor, None, None, None, None]:
         delta_pp, delta_np, delta_pn, delta_nn = init_backward(
-            grad_4, ctx.is_output_layer, ctx.beta)
+            grad_4, ctx.is_output_layer)
 
         new_pp = delta_pp.view(ctx.input_shape)
         new_np = delta_np.view(ctx.input_shape)
@@ -47,7 +47,7 @@ class DCFlattenFunction(torch.autograd.Function):
 
 def dc_forward_flatten(m: nn.Flatten, x: Tensor) -> Tensor:
     return DCFlattenFunction.apply(x, m.start_dim, m.end_dim,
-                                    getattr(m, DC_IS_OUTPUT_LAYER, False), getattr(m, 0.5))
+                                    getattr(m, DC_IS_OUTPUT_LAYER, False))
 
 
 def patch_flatten(module: nn.Flatten) -> None:
@@ -81,13 +81,13 @@ class DCUnflattenFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, input_4: Tensor, dim: int, unflattened_size: Tuple[int, ...],
-                is_output_layer: bool, beta: float) -> Tensor:
+                is_output_layer: bool) -> Tensor:
         pos, neg = split_input_4(input_4)
 
         ctx.input_shape = pos.shape
         ctx.dim = dim
         ctx.is_output_layer = is_output_layer
-        ctx.beta = beta
+        
 
         out_pos = pos.unflatten(dim, unflattened_size)
         out_neg = neg.unflatten(dim, unflattened_size)
@@ -97,7 +97,7 @@ class DCUnflattenFunction(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_4: Tensor) -> Tuple[Tensor, None, None, None, None]:
         delta_pp, delta_np, delta_pn, delta_nn = init_backward(
-            grad_4, ctx.is_output_layer, ctx.beta)
+            grad_4, ctx.is_output_layer)
 
         # Flatten back to original shape
         new_pp = delta_pp.flatten(ctx.dim, ctx.dim + len(grad_4.shape) - len(ctx.input_shape))
@@ -110,7 +110,7 @@ class DCUnflattenFunction(torch.autograd.Function):
 
 def dc_forward_unflatten(m: nn.Unflatten, x: Tensor) -> Tensor:
     return DCUnflattenFunction.apply(x, m.dim, m.unflattened_size,
-                                      getattr(m, DC_IS_OUTPUT_LAYER, False), getattr(m, 0.5))
+                                      getattr(m, DC_IS_OUTPUT_LAYER, False))
 
 
 def patch_unflatten(module: nn.Unflatten) -> None:
@@ -155,12 +155,12 @@ class DCReshapeFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, input_4: Tensor, shape: Tuple[int, ...],
-                is_output_layer: bool, beta: float) -> Tensor:
+                is_output_layer: bool) -> Tensor:
         pos, neg = split_input_4(input_4)
 
         ctx.input_shape = pos.shape
         ctx.is_output_layer = is_output_layer
-        ctx.beta = beta
+        
 
         # Adjust shape for batch dimension (shape[0] should be -1 or match)
         out_pos = pos.reshape(shape)
@@ -171,7 +171,7 @@ class DCReshapeFunction(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_4: Tensor) -> Tuple[Tensor, None, None, None]:
         delta_pp, delta_np, delta_pn, delta_nn = init_backward(
-            grad_4, ctx.is_output_layer, ctx.beta)
+            grad_4, ctx.is_output_layer)
 
         new_pp = delta_pp.reshape(ctx.input_shape)
         new_np = delta_np.reshape(ctx.input_shape)
@@ -183,7 +183,7 @@ class DCReshapeFunction(torch.autograd.Function):
 
 def dc_forward_reshape(m: Reshape, x: Tensor) -> Tensor:
     return DCReshapeFunction.apply(x, m.shape,
-                                    getattr(m, DC_IS_OUTPUT_LAYER, False), getattr(m, 0.5))
+                                    getattr(m, DC_IS_OUTPUT_LAYER, False))
 
 
 def patch_reshape(module: Reshape) -> None:
@@ -227,7 +227,7 @@ class View(nn.Module):
 def dc_forward_view(m: View, x: Tensor) -> Tensor:
     # View and reshape have same behavior for DC
     return DCReshapeFunction.apply(x, m.shape,
-                                    getattr(m, DC_IS_OUTPUT_LAYER, False), getattr(m, 0.5))
+                                    getattr(m, DC_IS_OUTPUT_LAYER, False))
 
 
 def patch_view(module: View) -> None:
@@ -274,13 +274,13 @@ class DCSqueezeFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, input_4: Tensor, dim: int,
-                is_output_layer: bool, beta: float) -> Tensor:
+                is_output_layer: bool) -> Tensor:
         pos, neg = split_input_4(input_4)
 
         ctx.input_shape = pos.shape
         ctx.dim = dim
         ctx.is_output_layer = is_output_layer
-        ctx.beta = beta
+        
 
         if dim is None:
             out_pos = pos.squeeze()
@@ -294,7 +294,7 @@ class DCSqueezeFunction(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_4: Tensor) -> Tuple[Tensor, None, None, None]:
         delta_pp, delta_np, delta_pn, delta_nn = init_backward(
-            grad_4, ctx.is_output_layer, ctx.beta)
+            grad_4, ctx.is_output_layer)
 
         new_pp = delta_pp.view(ctx.input_shape)
         new_np = delta_np.view(ctx.input_shape)
@@ -306,7 +306,7 @@ class DCSqueezeFunction(torch.autograd.Function):
 
 def dc_forward_squeeze(m: Squeeze, x: Tensor) -> Tensor:
     return DCSqueezeFunction.apply(x, m.dim,
-                                    getattr(m, DC_IS_OUTPUT_LAYER, False), getattr(m, 0.5))
+                                    getattr(m, DC_IS_OUTPUT_LAYER, False))
 
 
 def patch_squeeze(module: Squeeze) -> None:
@@ -351,12 +351,12 @@ class DCUnsqueezeFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, input_4: Tensor, dim: int,
-                is_output_layer: bool, beta: float) -> Tensor:
+                is_output_layer: bool) -> Tensor:
         pos, neg = split_input_4(input_4)
 
         ctx.dim = dim
         ctx.is_output_layer = is_output_layer
-        ctx.beta = beta
+        
 
         out_pos = pos.unsqueeze(dim)
         out_neg = neg.unsqueeze(dim)
@@ -366,7 +366,7 @@ class DCUnsqueezeFunction(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_4: Tensor) -> Tuple[Tensor, None, None, None]:
         delta_pp, delta_np, delta_pn, delta_nn = init_backward(
-            grad_4, ctx.is_output_layer, ctx.beta)
+            grad_4, ctx.is_output_layer)
 
         new_pp = delta_pp.squeeze(ctx.dim)
         new_np = delta_np.squeeze(ctx.dim)
@@ -378,7 +378,7 @@ class DCUnsqueezeFunction(torch.autograd.Function):
 
 def dc_forward_unsqueeze(m: Unsqueeze, x: Tensor) -> Tensor:
     return DCUnsqueezeFunction.apply(x, m.dim,
-                                      getattr(m, DC_IS_OUTPUT_LAYER, False), getattr(m, 0.5))
+                                      getattr(m, DC_IS_OUTPUT_LAYER, False))
 
 
 def patch_unsqueeze(module: Unsqueeze) -> None:
@@ -424,12 +424,12 @@ class DCTransposeFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, input_4: Tensor, dim0: int, dim1: int,
-                is_output_layer: bool, beta: float) -> Tensor:
+                is_output_layer: bool) -> Tensor:
         pos, neg = split_input_4(input_4)
 
         ctx.dim0, ctx.dim1 = dim0, dim1
         ctx.is_output_layer = is_output_layer
-        ctx.beta = beta
+        
 
         out_pos = pos.transpose(dim0, dim1)
         out_neg = neg.transpose(dim0, dim1)
@@ -439,7 +439,7 @@ class DCTransposeFunction(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_4: Tensor) -> Tuple[Tensor, None, None, None, None]:
         delta_pp, delta_np, delta_pn, delta_nn = init_backward(
-            grad_4, ctx.is_output_layer, ctx.beta)
+            grad_4, ctx.is_output_layer)
 
         # Transpose is its own inverse
         new_pp = delta_pp.transpose(ctx.dim0, ctx.dim1)
@@ -452,7 +452,7 @@ class DCTransposeFunction(torch.autograd.Function):
 
 def dc_forward_transpose(m: Transpose, x: Tensor) -> Tensor:
     return DCTransposeFunction.apply(x, m.dim0, m.dim1,
-                                      getattr(m, DC_IS_OUTPUT_LAYER, False), getattr(m, 0.5))
+                                      getattr(m, DC_IS_OUTPUT_LAYER, False))
 
 
 def patch_transpose(module: Transpose) -> None:
@@ -497,12 +497,12 @@ class DCPermuteFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, input_4: Tensor, dims: Tuple[int, ...],
-                is_output_layer: bool, beta: float) -> Tensor:
+                is_output_layer: bool) -> Tensor:
         pos, neg = split_input_4(input_4)
 
         ctx.dims = dims
         ctx.is_output_layer = is_output_layer
-        ctx.beta = beta
+        
 
         out_pos = pos.permute(dims)
         out_neg = neg.permute(dims)
@@ -512,7 +512,7 @@ class DCPermuteFunction(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_4: Tensor) -> Tuple[Tensor, None, None, None]:
         delta_pp, delta_np, delta_pn, delta_nn = init_backward(
-            grad_4, ctx.is_output_layer, ctx.beta)
+            grad_4, ctx.is_output_layer)
 
         # Compute inverse permutation
         inv_dims = [0] * len(ctx.dims)
@@ -529,7 +529,7 @@ class DCPermuteFunction(torch.autograd.Function):
 
 def dc_forward_permute(m: Permute, x: Tensor) -> Tensor:
     return DCPermuteFunction.apply(x, m.dims,
-                                    getattr(m, DC_IS_OUTPUT_LAYER, False), getattr(m, 0.5))
+                                    getattr(m, DC_IS_OUTPUT_LAYER, False))
 
 
 def patch_permute(module: Permute) -> None:
@@ -562,10 +562,10 @@ def unpatch_permute(module: Permute) -> None:
 class DCDropoutFunction(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, input_4: Tensor, is_output_layer: bool, beta: float) -> Tensor:
+    def forward(ctx, input_4: Tensor, is_output_layer: bool) -> Tensor:
         # In DC mode, dropout is identity (should only be used in eval mode)
         ctx.is_output_layer = is_output_layer
-        ctx.beta = beta
+        
         return input_4
 
     @staticmethod
@@ -576,7 +576,7 @@ class DCDropoutFunction(torch.autograd.Function):
 
 def dc_forward_dropout(m: nn.Dropout, x: Tensor) -> Tensor:
     return DCDropoutFunction.apply(x,
-                                    getattr(m, DC_IS_OUTPUT_LAYER, False), getattr(m, 0.5))
+                                    getattr(m, DC_IS_OUTPUT_LAYER, False))
 
 
 def patch_dropout(module: nn.Dropout) -> None:

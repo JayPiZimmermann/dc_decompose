@@ -34,7 +34,7 @@ class Contiguous(nn.Module):
 class DCContiguousFunction(torch.autograd.Function):
     
     @staticmethod
-    def forward(ctx, input_4: Tensor, is_output_layer: bool, beta: float) -> Tensor:
+    def forward(ctx, input_4: Tensor, is_output_layer: bool) -> Tensor:
         pos, neg = split_input_4(input_4)
         
         # Make both streams contiguous
@@ -42,7 +42,7 @@ class DCContiguousFunction(torch.autograd.Function):
         out_neg = neg.contiguous()
         
         ctx.is_output_layer = is_output_layer
-        ctx.beta = beta
+        
         
         output = make_output_4(out_pos, out_neg)
         return recenter_forward(output)
@@ -50,7 +50,7 @@ class DCContiguousFunction(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_4: Tensor) -> Tuple[Tensor, None, None]:
         delta_pp, delta_np, delta_pn, delta_nn = init_backward(
-            grad_4, ctx.is_output_layer, ctx.beta)
+            grad_4, ctx.is_output_layer)
         
         # Contiguous is a no-op for gradients - just pass them through
         grad_input = make_grad_4(delta_pp, delta_np, delta_pn, delta_nn)

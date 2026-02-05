@@ -99,30 +99,30 @@ def _make_relu_function(split_mode: str, backprop_mode: str) -> Type[torch.autog
         """ReLU DC function with split_mode and backprop_mode captured from closure."""
 
         @staticmethod
-        def forward(ctx, input_4: Tensor, is_output_layer: bool, beta: float) -> Tensor:
+        def forward(ctx, input_4: Tensor, is_output_layer: bool) -> Tensor:
             pos, neg = split_input_4(input_4)
             z = pos - neg
 
             out_pos, out_neg = forward_relu(pos, neg, split_mode)
 
             ctx.save_for_backward(z)
-            ctx.is_output_layer, ctx.beta = is_output_layer, beta
+            ctx.is_output_layer = is_output_layer
 
             output = make_output_4(out_pos, out_neg)
             return recenter_dc(output)
 
         @staticmethod
-        def backward(ctx, grad_4: Tensor) -> Tuple[Tensor, None, None]:
+        def backward(ctx, grad_4: Tensor) -> Tuple[Tensor, None]:
             z, = ctx.saved_tensors
             mp, mn = (z >= 0).float(), (z < 0).float()
 
             delta_pp, delta_np, delta_pn, delta_nn = init_backward(
-                grad_4, ctx.is_output_layer, ctx.beta)
+                grad_4, ctx.is_output_layer)
 
             new_pp, new_np, new_pn, new_nn = backward_relu(
                 delta_pp, delta_np, delta_pn, delta_nn, mp, mn, split_mode, backprop_mode)
 
-            return make_grad_4(new_pp, new_np, new_pn, new_nn), None, None
+            return make_grad_4(new_pp, new_np, new_pn, new_nn), None
 
     return DCReLUFunction
 
@@ -187,8 +187,7 @@ def dc_forward_relu(m: nn.ReLU, x: Tensor) -> Tensor:
     func = getattr(m, DC_RELU_FUNCTION)
     return func.apply(
         x,
-        getattr(m, DC_IS_OUTPUT_LAYER, False),
-        getattr(m, 0.5)
+        getattr(m, DC_IS_OUTPUT_LAYER, False)
     )
 
 
@@ -200,7 +199,6 @@ def patch_relu(m: nn.ReLU, split_mode: str = 'max', backprop_mode: str = 'standa
     setattr(m, DC_BACKPROP_MODE, backprop_mode)
     setattr(m, DC_RELU_FUNCTION, _make_relu_function(split_mode, backprop_mode))
     setattr(m, DC_IS_OUTPUT_LAYER, False)
-    setattr(m, 0.5)
 
     def patched(x):
         if getattr(m, DC_ENABLED, False):

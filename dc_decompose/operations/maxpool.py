@@ -16,7 +16,7 @@ class DCMaxPool2dFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, input_4: Tensor, kernel_size, stride, padding,
-                is_output_layer: bool, beta: float) -> Tensor:
+                is_output_layer: bool) -> Tensor:
         pos, neg = split_input_4(input_4)
 
         z = pos - neg
@@ -35,7 +35,7 @@ class DCMaxPool2dFunction(torch.autograd.Function):
         ctx.save_for_backward(indices)
         ctx.input_shape = pos.shape
         ctx.is_output_layer = is_output_layer
-        ctx.beta = beta
+        
 
         return make_output_4(out_pos, out_neg)
 
@@ -72,7 +72,7 @@ class DCMaxPool1dFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, input_4: Tensor, kernel_size, stride, padding,
-                is_output_layer: bool, beta: float) -> Tensor:
+                is_output_layer: bool) -> Tensor:
         pos, neg = split_input_4(input_4)
 
         z = pos - neg
@@ -91,7 +91,7 @@ class DCMaxPool1dFunction(torch.autograd.Function):
         ctx.save_for_backward(indices)
         ctx.input_shape = pos.shape
         ctx.is_output_layer = is_output_layer
-        ctx.beta = beta
+        
 
         return make_output_4(out_pos, out_neg)
 
@@ -129,13 +129,13 @@ def dc_forward_maxpool2d(module: nn.MaxPool2d, x: Tensor) -> Tensor:
     stride = module.stride if isinstance(module.stride, tuple) else (module.stride, module.stride)
     padding = module.padding if isinstance(module.padding, tuple) else (module.padding, module.padding)
     return DCMaxPool2dFunction.apply(x, kernel_size, stride, padding,
-                                      getattr(module, DC_IS_OUTPUT_LAYER, False), 0.5)
+                                      getattr(module, DC_IS_OUTPUT_LAYER, False))
 
 
 def dc_forward_maxpool1d(module: nn.MaxPool1d, x: Tensor) -> Tensor:
     stride = module.stride if module.stride is not None else module.kernel_size
     return DCMaxPool1dFunction.apply(x, module.kernel_size, stride, module.padding,
-                                      getattr(module, DC_IS_OUTPUT_LAYER, False), 0.5)
+                                      getattr(module, DC_IS_OUTPUT_LAYER, False))
 
 
 def patch_maxpool2d(module: nn.MaxPool2d) -> None:

@@ -41,7 +41,7 @@ class DCMeanFunction(torch.autograd.Function):
     
     @staticmethod
     def forward(ctx, input_4: Tensor, dim, keepdim: bool,
-                is_output_layer: bool, beta: float) -> Tensor:
+                is_output_layer: bool) -> Tensor:
         pos, neg = split_input_4(input_4)
         
         # Apply mean to both streams
@@ -56,7 +56,7 @@ class DCMeanFunction(torch.autograd.Function):
         ctx.dim = dim
         ctx.keepdim = keepdim
         ctx.is_output_layer = is_output_layer
-        ctx.beta = beta
+        
         
         output = make_output_4(out_pos, out_neg)
         return recenter_forward(output)
@@ -68,7 +68,7 @@ class DCMeanFunction(torch.autograd.Function):
         keepdim = ctx.keepdim
         
         delta_pp, delta_np, delta_pn, delta_nn = init_backward(
-            grad_4, ctx.is_output_layer, ctx.beta)
+            grad_4, ctx.is_output_layer)
         
         # For mean, gradients are distributed evenly across reduced dimensions
         if dim is None:

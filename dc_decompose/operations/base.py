@@ -108,11 +108,10 @@ def init_backward(grad_4: Tensor, is_output_layer: bool) -> Tuple[Tensor, Tensor
     if is_output_layer:
         q = grad_4.shape[0] // 4
         grad_orig = grad_4[:q]  # Use only first quarter as original gradient
-        # Initialize as: pp=orig, pn=-orig, np=nn=0
-        delta_pp = grad_orig
+        delta_pp = 0.5 * grad_orig
         delta_np = torch.zeros_like(grad_orig)
-        delta_pn = -grad_orig
-        delta_nn = torch.zeros_like(grad_orig)
+        delta_pn = torch.zeros_like(grad_orig)
+        delta_nn = 0.5 * grad_orig
         result = delta_pp, delta_np, delta_pn, delta_nn
 
         # Log output layer initialization
@@ -297,27 +296,25 @@ class ReconstructOutputFunction(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, output_4: Tensor, beta: float) -> Tensor:
+    def forward(ctx, output_4: Tensor) -> Tensor:
         q = output_4.shape[0] // 4
         out_pos = output_4[:q]
         out_neg = output_4[q:2*q]
-        ctx.beta = beta
+        
         return out_pos - out_neg
 
     @staticmethod
-    def backward(ctx, grad: Tensor) -> Tuple[Tensor, None]:
-        beta = ctx.beta
+    def backward(ctx, grad: Tensor) -> Tuple[Tensor]:
         zeros = torch.zeros_like(grad)
-        # Initialize sensitivities:
-        # delta_pp = beta * g, delta_np = 0, delta_pn = -(1-beta)*g, delta_nn = 0
-        delta_pp = beta * grad
+        # Initialize sensitivities: pp=grad, pn=0, np=nn=0 (equivalent to beta=1.0)
+        delta_pp = grad
         delta_np = zeros
-        delta_pn = -(1 - beta) * grad
+        delta_pn = zeros
         delta_nn = zeros
-        return torch.cat([delta_pp, delta_np, delta_pn, delta_nn], dim=0), None
+        return torch.cat([delta_pp, delta_np, delta_pn, delta_nn], dim=0),
 
 
-def reconstruct_output(output_4: Tensor, beta: float = 1.0) -> Tensor:
+def reconstruct_output(output_4: Tensor) -> Tensor:
     """Reconstruct original output from [4*batch]: out_pos - out_neg.
 
     Args:
@@ -325,7 +322,7 @@ def reconstruct_output(output_4: Tensor, beta: float = 1.0) -> Tensor:
         beta: Sensitivity initialization weight (default 1.0).
               Backward pass initializes: delta_pp = beta*g, delta_pn = -(1-beta)*g
     """
-    result = ReconstructOutputFunction.apply(output_4, beta)
+    result = ReconstructOutputFunction.apply(output_4)
 
     # Log reconstruction
     try:
@@ -473,7 +470,7 @@ class DCForward:
 
         # Forward pass
         self._out_cat = self.model(self._x_cat)
-        self._output = reconstruct_output(self._out_cat, self.beta)
+        self._output = reconstruct_output(self._out_cat)
 
         return self
 

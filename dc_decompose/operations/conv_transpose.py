@@ -14,7 +14,7 @@ class DCConvTranspose2dFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input_4: Tensor, weight: Tensor, bias: Optional[Tensor],
                 stride, padding, output_padding, dilation, groups,
-                is_output_layer: bool, beta: float) -> Tensor:
+                is_output_layer: bool) -> Tensor:
         pos, neg = split_input_4(input_4)
 
         weight_pos = F.relu(weight)
@@ -31,7 +31,7 @@ class DCConvTranspose2dFunction(torch.autograd.Function):
 
         ctx.save_for_backward(weight_pos, weight_neg)
         ctx.stride, ctx.padding, ctx.dilation, ctx.groups = stride, padding, dilation, groups
-        ctx.is_output_layer, ctx.beta = is_output_layer, beta
+        ctx.is_output_layer = is_output_layer, beta
         ctx.input_shape = pos.shape
 
         return make_output_4(out_pos, out_neg)
@@ -41,7 +41,7 @@ class DCConvTranspose2dFunction(torch.autograd.Function):
         weight_pos, weight_neg = ctx.saved_tensors
 
         delta_pp, delta_np, delta_pn, delta_nn = init_backward(
-            grad_4, ctx.is_output_layer, ctx.beta)
+            grad_4, ctx.is_output_layer)
 
         # Backward of conv_transpose is conv
         def conv(d, w):
@@ -60,7 +60,7 @@ class DCConvTranspose1dFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input_4: Tensor, weight: Tensor, bias: Optional[Tensor],
                 stride, padding, output_padding, dilation, groups,
-                is_output_layer: bool, beta: float) -> Tensor:
+                is_output_layer: bool) -> Tensor:
         pos, neg = split_input_4(input_4)
 
         weight_pos = F.relu(weight)
@@ -77,7 +77,7 @@ class DCConvTranspose1dFunction(torch.autograd.Function):
 
         ctx.save_for_backward(weight_pos, weight_neg)
         ctx.stride, ctx.padding, ctx.dilation, ctx.groups = stride, padding, dilation, groups
-        ctx.is_output_layer, ctx.beta = is_output_layer, beta
+        ctx.is_output_layer = is_output_layer, beta
         ctx.input_shape = pos.shape
 
         return make_output_4(out_pos, out_neg)
@@ -87,7 +87,7 @@ class DCConvTranspose1dFunction(torch.autograd.Function):
         weight_pos, weight_neg = ctx.saved_tensors
 
         delta_pp, delta_np, delta_pn, delta_nn = init_backward(
-            grad_4, ctx.is_output_layer, ctx.beta)
+            grad_4, ctx.is_output_layer)
 
         def conv(d, w):
             return F.conv1d(d, w, None, ctx.stride, ctx.padding, ctx.dilation, ctx.groups)
@@ -107,14 +107,14 @@ def dc_forward_conv_transpose2d(m: nn.ConvTranspose2d, x: Tensor) -> Tensor:
     dilation = m.dilation if isinstance(m.dilation, tuple) else (m.dilation, m.dilation)
     return DCConvTranspose2dFunction.apply(
         x, m.weight, m.bias, stride, padding, output_padding, dilation, m.groups,
-        getattr(m, DC_IS_OUTPUT_LAYER, False), getattr(m, 0.5)
+        getattr(m, DC_IS_OUTPUT_LAYER, False)
     )
 
 
 def dc_forward_conv_transpose1d(m: nn.ConvTranspose1d, x: Tensor) -> Tensor:
     return DCConvTranspose1dFunction.apply(
         x, m.weight, m.bias, m.stride[0], m.padding[0], m.output_padding[0], m.dilation[0], m.groups,
-        getattr(m, DC_IS_OUTPUT_LAYER, False), getattr(m, 0.5)
+        getattr(m, DC_IS_OUTPUT_LAYER, False)
     )
 
 
@@ -123,7 +123,6 @@ def patch_conv_transpose2d(m: nn.ConvTranspose2d) -> None:
     setattr(m, DC_ORIGINAL_FORWARD, m.forward)
     setattr(m, DC_ENABLED, True)
     setattr(m, DC_IS_OUTPUT_LAYER, False)
-    setattr(m, 0.5)
 
     def patched(x):
         if getattr(m, DC_ENABLED, False):
@@ -139,7 +138,6 @@ def patch_conv_transpose1d(m: nn.ConvTranspose1d) -> None:
     setattr(m, DC_ORIGINAL_FORWARD, m.forward)
     setattr(m, DC_ENABLED, True)
     setattr(m, DC_IS_OUTPUT_LAYER, False)
-    setattr(m, 0.5)
 
     def patched(x):
         if getattr(m, DC_ENABLED, False):

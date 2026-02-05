@@ -20,7 +20,7 @@ class DCEmbeddingFunction(torch.autograd.Function):
     
     @staticmethod
     def forward(ctx, input_4: Tensor, weight: Tensor, padding_idx, max_norm, norm_type, scale_grad_by_freq, sparse,
-                is_output_layer: bool, beta: float) -> Tensor:
+                is_output_layer: bool) -> Tensor:
         # For embedding, we typically use the same indices for pos/neg
         # The input_4 contains indices, not pos/neg decomposed values
         pos_indices, neg_indices = split_input_4(input_4)
@@ -36,7 +36,7 @@ class DCEmbeddingFunction(torch.autograd.Function):
         ctx.scale_grad_by_freq = scale_grad_by_freq
         ctx.sparse = sparse
         ctx.is_output_layer = is_output_layer
-        ctx.beta = beta
+        
         
         output = make_output_4(out_pos, out_neg)
         return recenter_forward(output)
@@ -46,7 +46,7 @@ class DCEmbeddingFunction(torch.autograd.Function):
         pos_indices, neg_indices, weight = ctx.saved_tensors
         
         delta_pp, delta_np, delta_pn, delta_nn = init_backward(
-            grad_4, ctx.is_output_layer, ctx.beta)
+            grad_4, ctx.is_output_layer)
         
         # For embedding, gradients flow back to the weight matrix
         # Input gradients are typically not needed for embedding indices

@@ -22,7 +22,7 @@ class DCLayerNormFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input_4: Tensor, normalized_shape: List[int],
                 weight: Tensor, bias: Tensor, eps: float,
-                is_output_layer: bool, beta: float) -> Tensor:
+                is_output_layer: bool) -> Tensor:
         pos, neg = split_input_4(input_4)
         z = pos - neg
 
@@ -48,7 +48,7 @@ class DCLayerNormFunction(torch.autograd.Function):
         ctx.normalized_shape = normalized_shape
         ctx.eps = eps
         ctx.is_output_layer = is_output_layer
-        ctx.beta = beta
+        
 
         return make_output_4(out_pos, out_neg)
 
@@ -59,7 +59,7 @@ class DCLayerNormFunction(torch.autograd.Function):
         eps = ctx.eps
 
         delta_pp, delta_np, delta_pn, delta_nn = init_backward(
-            grad_4, ctx.is_output_layer, ctx.beta)
+            grad_4, ctx.is_output_layer)
 
         # Reconstruct gradient w.r.t. z for each sensitivity
         # LayerNorm backward: dL/dz = dL/dy * dy/dz

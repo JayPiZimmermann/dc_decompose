@@ -50,7 +50,7 @@ class DCMulFunction(torch.autograd.Function):
     
     @staticmethod
     def forward(ctx, input_4: Tensor, operand_4: Tensor,
-                is_output_layer: bool, beta: float) -> Tensor:
+                is_output_layer: bool) -> Tensor:
         A_pos, A_neg = split_input_4(input_4)
         B_pos, B_neg = split_input_4(operand_4)
         
@@ -61,7 +61,7 @@ class DCMulFunction(torch.autograd.Function):
         # Save for backward
         ctx.save_for_backward(A_pos, A_neg, B_pos, B_neg)
         ctx.is_output_layer = is_output_layer
-        ctx.beta = beta
+        
         
         output = make_output_4(out_pos, out_neg)
         return recenter_forward(output)
@@ -71,7 +71,7 @@ class DCMulFunction(torch.autograd.Function):
         A_pos, A_neg, B_pos, B_neg = ctx.saved_tensors
         
         delta_pp, delta_np, delta_pn, delta_nn = init_backward(
-            grad_4, ctx.is_output_layer, ctx.beta)
+            grad_4, ctx.is_output_layer)
         
         # Backward w.r.t. A using product rule
         new_pp_A = delta_pp * B_pos + delta_pn * B_neg
@@ -95,7 +95,7 @@ class DCScalarMulFunction(torch.autograd.Function):
     
     @staticmethod
     def forward(ctx, input_4: Tensor, scalar: float,
-                is_output_layer: bool, beta: float) -> Tensor:
+                is_output_layer: bool) -> Tensor:
         A_pos, A_neg = split_input_4(input_4)
         
         # DC scalar mul: (A+ - A-) * c = A+ * c - A- * c
@@ -109,7 +109,7 @@ class DCScalarMulFunction(torch.autograd.Function):
         
         ctx.scalar = scalar
         ctx.is_output_layer = is_output_layer
-        ctx.beta = beta
+        
         
         output = make_output_4(out_pos, out_neg)
         return recenter_forward(output)
@@ -117,7 +117,7 @@ class DCScalarMulFunction(torch.autograd.Function):
     @staticmethod  
     def backward(ctx, grad_4: Tensor) -> Tuple[Tensor, None, None, None]:
         delta_pp, delta_np, delta_pn, delta_nn = init_backward(
-            grad_4, ctx.is_output_layer, ctx.beta)
+            grad_4, ctx.is_output_layer)
         
         # Backward for scalar multiplication
         scalar = ctx.scalar

@@ -9,7 +9,7 @@ from typing import Tuple, Optional
 from .base import (
     split_input_4, make_output_4, make_grad_4,
     init_backward, recenter_forward,
-    DC_ENABLED, DC_ORIGINAL_FORWARD, DC_IS_OUTPUT_LAYER, DC_SPLIT_WEIGHTS_ON_FLY
+    DC_ENABLED, DC_ORIGINAL_FORWARD, DC_IS_OUTPUT_LAYER
 )
 
 
@@ -83,7 +83,7 @@ class DCMatMulFunction(torch.autograd.Function):
     
     @staticmethod
     def forward(ctx, input_4: Tensor, operand_4: Tensor, transpose_b: bool,
-                is_output_layer: bool, beta: float) -> Tensor:
+                is_output_layer: bool) -> Tensor:
         A_pos, A_neg = split_input_4(input_4)
         B_pos, B_neg = split_input_4(operand_4)
         
@@ -99,7 +99,7 @@ class DCMatMulFunction(torch.autograd.Function):
         ctx.save_for_backward(A_pos, A_neg, B_pos, B_neg)
         ctx.transpose_b = transpose_b
         ctx.is_output_layer = is_output_layer
-        ctx.beta = beta
+        
         
         output = make_output_4(out_pos, out_neg)
         return recenter_forward(output)
@@ -109,7 +109,7 @@ class DCMatMulFunction(torch.autograd.Function):
         A_pos, A_neg, B_pos, B_neg = ctx.saved_tensors
         
         delta_pp, delta_np, delta_pn, delta_nn = init_backward(
-            grad_4, ctx.is_output_layer, ctx.beta)
+            grad_4, ctx.is_output_layer)
         
         # Backward w.r.t. A using product rule
         if ctx.transpose_b:

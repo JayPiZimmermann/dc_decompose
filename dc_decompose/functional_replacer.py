@@ -17,7 +17,7 @@ from .operations.add import Add
 from .operations.shape_ops import Reshape, View, Squeeze, Unsqueeze, Transpose, Permute
 from .operations.matmul import DCMatMul
 from .operations.mul import DCMul
-from .operations.base import DC_ENABLED, DC_ORIGINAL_FORWARD, DC_IS_OUTPUT_LAYER, DC_BETA
+from .operations.base import DC_ENABLED, DC_ORIGINAL_FORWARD, DC_IS_OUTPUT_LAYER
 from .operations.base import split_input_4, make_output_4, split_grad_4, make_grad_4
 from .inline_module_replacer import replace_inline_modules
 
@@ -563,7 +563,7 @@ def dc_forward_mul(m: Mul, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     return DCMulFunction.apply(
         x, y,
         getattr(m, DC_IS_OUTPUT_LAYER, False),
-        getattr(m, DC_BETA, 0.5)
+        0.5
     )
 
 
@@ -574,7 +574,6 @@ def patch_mul(module: Mul) -> None:
     setattr(module, DC_ORIGINAL_FORWARD, module.forward)
     setattr(module, DC_ENABLED, True)
     setattr(module, DC_IS_OUTPUT_LAYER, False)
-    setattr(module, DC_BETA, 0.5)
 
     def patched(x, y):
         if getattr(module, DC_ENABLED, False):
@@ -589,7 +588,7 @@ def unpatch_mul(module: Mul) -> None:
     """Unpatch Mul module."""
     if hasattr(module, DC_ORIGINAL_FORWARD):
         module.forward = getattr(module, DC_ORIGINAL_FORWARD)
-        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER, DC_BETA]:
+        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER]:
             if hasattr(module, a):
                 delattr(module, a)
 
@@ -599,7 +598,7 @@ def dc_forward_mean(m: Mean, x: torch.Tensor) -> torch.Tensor:
     return DCMeanFunction.apply(
         x, m.dim, m.keepdim,
         getattr(m, DC_IS_OUTPUT_LAYER, False),
-        getattr(m, DC_BETA, 0.5)
+        0.5
     )
 
 
@@ -610,7 +609,6 @@ def patch_mean(module: Mean) -> None:
     setattr(module, DC_ORIGINAL_FORWARD, module.forward)
     setattr(module, DC_ENABLED, True)
     setattr(module, DC_IS_OUTPUT_LAYER, False)
-    setattr(module, DC_BETA, 0.5)
 
     def patched(x):
         if getattr(module, DC_ENABLED, False):
@@ -625,6 +623,6 @@ def unpatch_mean(module: Mean) -> None:
     """Unpatch Mean module."""
     if hasattr(module, DC_ORIGINAL_FORWARD):
         module.forward = getattr(module, DC_ORIGINAL_FORWARD)
-        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER, DC_BETA]:
+        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER]:
             if hasattr(module, a):
                 delattr(module, a)

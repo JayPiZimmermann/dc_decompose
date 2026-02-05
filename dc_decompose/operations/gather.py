@@ -38,7 +38,7 @@ class DCGatherFunction(torch.autograd.Function):
     
     @staticmethod
     def forward(ctx, input_4: Tensor, index: Tensor, dim: int,
-                is_output_layer: bool, beta: float) -> Tensor:
+                is_output_layer: bool) -> Tensor:
         pos, neg = split_input_4(input_4)
         
         # Apply gather to both streams with the same indices
@@ -48,7 +48,7 @@ class DCGatherFunction(torch.autograd.Function):
         ctx.save_for_backward(input_4, index)
         ctx.dim = dim
         ctx.is_output_layer = is_output_layer
-        ctx.beta = beta
+        
         
         output = make_output_4(out_pos, out_neg)
         return recenter_forward(output)
@@ -58,7 +58,7 @@ class DCGatherFunction(torch.autograd.Function):
         input_4, index = ctx.saved_tensors
         
         delta_pp, delta_np, delta_pn, delta_nn = init_backward(
-            grad_4, ctx.is_output_layer, ctx.beta)
+            grad_4, ctx.is_output_layer)
         
         # Scatter gradients back using the same indices
         input_shape = split_input_4(input_4)[0].shape

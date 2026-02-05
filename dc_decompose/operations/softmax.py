@@ -23,7 +23,7 @@ class DCSoftmaxFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, input_4: Tensor, dim: int,
-                is_output_layer: bool, beta: float) -> Tensor:
+                is_output_layer: bool) -> Tensor:
         pos, neg = split_input_4(input_4)
         z = pos - neg
 
@@ -38,7 +38,7 @@ class DCSoftmaxFunction(torch.autograd.Function):
         ctx.save_for_backward(s)
         ctx.dim = dim
         ctx.is_output_layer = is_output_layer
-        ctx.beta = beta
+        
 
         return make_output_4(out_pos, out_neg)
 
@@ -48,7 +48,7 @@ class DCSoftmaxFunction(torch.autograd.Function):
         dim = ctx.dim
 
         delta_pp, delta_np, delta_pn, delta_nn = init_backward(
-            grad_4, ctx.is_output_layer, ctx.beta)
+            grad_4, ctx.is_output_layer)
 
         def softmax_backward(delta):
             # Jacobian of softmax: J = diag(s) - s @ s^T

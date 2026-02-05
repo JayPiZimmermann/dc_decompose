@@ -35,6 +35,7 @@ from typing import Dict, List, Optional, Tuple, Union, Callable
 from dataclasses import dataclass, field
 
 from dc_decompose.patcher import prepare_model_for_dc, unpatch_model
+from dc_decompose.functional_replacer import replace_functional_with_modules
 from dc_decompose.operations.base import (
     init_catted, reconstruct_output, InputMode, split4,
     Sensitivities, extract_sensitivities, dc_forward,
@@ -48,7 +49,18 @@ from dc_decompose.operations.base import (
 DEFAULT_FWD_ABS_TOL = 1e-5
 DEFAULT_FWD_REL_TOL = 1e-5
 DEFAULT_BWD_ABS_TOL = 1e-4
-DEFAULT_BWD_REL_TOL = 0.1
+DEFAULT_BWD_REL_TOL = 1e-2  # 1% relative error maximum (was 10%)
+
+
+# =============================================================================
+# Column Display Configuration
+# =============================================================================
+
+SHOW_SENSITIVITY_NORMS = True      # Show ||δ_pp||, ||δ_np||, ||δ_pn||, ||δ_nn|| columns
+SHOW_ACTIVATION_NORMS = True       # Show ||pos||, ||neg|| columns
+SHOW_ORIGINAL_GRAD_NORMS = True    # Show ||∇_orig|| column  
+INIT_RANDOM_BIASES = True          # Initialize biases randomly (not zeros)
+INIT_LARGER_WEIGHTS = True         # Initialize weights with larger values for more significant gradients
 
 
 # =============================================================================
@@ -60,6 +72,7 @@ class LayerResult:
     """Result for a single layer."""
     name: str
     module_type: str
+    display_name: str = ""  # Custom display name with input info
 
     # Forward errors
     fwd_abs_error: float = 0.0
@@ -68,6 +81,19 @@ class LayerResult:
     # Backward errors
     bwd_abs_error: float = 0.0
     bwd_rel_error: float = 0.0
+
+    # L2 norms of sensitivity components
+    sens_pp_norm: float = 0.0
+    sens_np_norm: float = 0.0  
+    sens_pn_norm: float = 0.0
+    sens_nn_norm: float = 0.0
+
+    # L2 norms of pos/neg activation components
+    act_pos_norm: float = 0.0
+    act_neg_norm: float = 0.0
+
+    # L2 norm of original gradient
+    orig_grad_norm: float = 0.0
 
     # Pass/fail
     fwd_pass: bool = True
@@ -117,6 +143,7 @@ class LayerCache:
         self.dc_outputs: Dict[str, Tensor] = {}
         self.dc_grad_inputs: Dict[str, Tensor] = {}
         self.dc_grad_inputs_raw: Dict[str, Tensor] = {}  # Raw [4*batch] gradients for sum check
+        self.dc_activations_raw: Dict[str, Tensor] = {}  # Raw [4*batch] activations for norm computation
         self.layer_types: Dict[str, str] = {}
         self.layer_order: List[str] = []
         self._handles: List = []
@@ -127,6 +154,7 @@ class LayerCache:
         self.dc_outputs.clear()
         self.dc_grad_inputs.clear()
         self.dc_grad_inputs_raw.clear()
+        self.dc_activations_raw.clear()
         self.layer_types.clear()
         self.layer_order.clear()
         self._remove_hooks()
@@ -172,6 +200,8 @@ class LayerCache:
 
                 def make_fwd_hook(n):
                     def hook(m, inp, out):
+                        # Store raw activations for norm computation
+                        self.dc_activations_raw[n] = out.detach().clone()
                         # Reconstruct from [4*batch] format
                         if out.shape[0] % 4 == 0:
                             q = out.shape[0] // 4
@@ -201,6 +231,19 @@ class LayerCache:
 
     def _is_trackable(self, module: nn.Module) -> bool:
         """Check if module should be tracked."""
+        # Import custom modules
+        try:
+            from dc_decompose.operations.add import Add
+            from dc_decompose.operations.mul import DCMul  
+            from dc_decompose.operations.mean import Mean
+            from dc_decompose.operations.contiguous import Contiguous
+            from dc_decompose.operations.shape_ops import Reshape, View, Squeeze, Unsqueeze
+            from dc_decompose.operations.tensor_ops import DCSplit, DCChunk, DCCat, DCSlice
+            custom_modules = (Add, DCMul, Mean, Contiguous, Reshape, View, Squeeze, Unsqueeze, 
+                            DCSplit, DCChunk, DCCat, DCSlice)
+        except ImportError:
+            custom_modules = ()
+        
         return isinstance(module, (
             nn.Linear, nn.Conv1d, nn.Conv2d,
             nn.ReLU, nn.LeakyReLU, nn.GELU,
@@ -209,7 +252,7 @@ class LayerCache:
             nn.AvgPool1d, nn.AvgPool2d,
             nn.AdaptiveAvgPool1d, nn.AdaptiveAvgPool2d,
             nn.Flatten, nn.Dropout,
-        ))
+        ) + custom_modules)
 
     def compute_errors(self, fwd_abs_tol: float, fwd_rel_tol: float,
                        bwd_abs_tol: float, bwd_rel_tol: float,
@@ -225,6 +268,7 @@ class LayerCache:
         for name in self.layer_order:
             layer_type = self.layer_types.get(name, "Unknown")
             lr = LayerResult(name=name, module_type=layer_type)
+            lr.display_name = _get_add_display_name(name, layer_type)
 
             # Forward error
             if name in self.orig_outputs and name in self.dc_outputs:
@@ -245,7 +289,29 @@ class LayerCache:
                     lr.bwd_abs_error = diff.max().item()
                     lr.bwd_rel_error = lr.bwd_abs_error / (orig.abs().max().item() + 1e-10)
                     lr.bwd_pass = lr.bwd_abs_error < bwd_abs_tol or lr.bwd_rel_error < bwd_rel_tol
+                
+                # Compute original gradient norm
+                lr.orig_grad_norm = orig.norm().item()
 
+            # Compute L2 norms of sensitivity components
+            if name in self.dc_grad_inputs_raw:
+                raw_grad = self.dc_grad_inputs_raw[name]
+                if raw_grad.shape[0] % 4 == 0:
+                    q = raw_grad.shape[0] // 4
+                    pp, np, pn, nn = raw_grad[:q], raw_grad[q:2*q], raw_grad[2*q:3*q], raw_grad[3*q:]
+                    lr.sens_pp_norm = pp.norm().item()
+                    lr.sens_np_norm = np.norm().item()
+                    lr.sens_pn_norm = pn.norm().item()
+                    lr.sens_nn_norm = nn.norm().item()
+
+            # Compute L2 norms of activation components
+            if name in self.dc_activations_raw:
+                raw_act = self.dc_activations_raw[name]
+                if raw_act.shape[0] % 4 == 0:
+                    q = raw_act.shape[0] // 4
+                    pos, neg = raw_act[:q], raw_act[q:2*q]
+                    lr.act_pos_norm = pos.norm().item()
+                    lr.act_neg_norm = neg.norm().item()
 
             results.append(lr)
 
@@ -272,6 +338,19 @@ class LayerCache:
             lr.bwd_abs_error = diff.max().item()
             lr.bwd_rel_error = lr.bwd_abs_error / (orig_grad.abs().max().item() + 1e-10)
             lr.bwd_pass = lr.bwd_abs_error < bwd_abs_tol or lr.bwd_rel_error < bwd_rel_tol
+            
+            # Compute original gradient norm for input
+            lr.orig_grad_norm = orig_grad.norm().item()
+            
+            # Compute L2 norms of sensitivity components for input
+            if input_grad_raw is not None and input_grad_raw.shape[0] % 4 == 0:
+                q = input_grad_raw.shape[0] // 4
+                pp, np, pn, nn = input_grad_raw[:q], input_grad_raw[q:2*q], input_grad_raw[2*q:3*q], input_grad_raw[3*q:]
+                lr.sens_pp_norm = pp.norm().item()
+                lr.sens_np_norm = np.norm().item()
+                lr.sens_pn_norm = pn.norm().item()
+                lr.sens_nn_norm = nn.norm().item()
+            
             # Insert at beginning
             results.insert(0, lr)
 
@@ -279,12 +358,62 @@ class LayerCache:
 
 
 # =============================================================================
-# Core Testing Functions
+# Core Testing Functions  
 # =============================================================================
 
+def _get_add_display_name(layer_name: str, module_type: str) -> str:
+    """Generate display name for Add modules showing input sources."""
+    if module_type == "Add" and "_dc_add_" in layer_name:
+        # Parse ResNet Add module names like "blocks.0._dc_add_0" 
+        if "blocks." in layer_name and "._dc_add_" in layer_name:
+            # Extract block number, e.g., "blocks.0._dc_add_0" -> "0"
+            parts = layer_name.split(".")
+            if len(parts) >= 2 and parts[0] == "blocks":
+                block_num = parts[1]
+                main_path = f"blocks.{block_num}.bn2"
+                skip_path = f"blocks.{block_num} identity"
+                return f"Add({main_path} + {skip_path})"
+        
+        # Parse simple Add module names like "_dc_add_0"
+        elif layer_name.startswith("_dc_add_"):
+            return f"Add(conv2 + identity)"
+            
+        # Fallback for other Add patterns
+        return f"Add(* + *)"
+    
+    return layer_name
+
+
+def init_random_biases(model: nn.Module) -> None:
+    """Initialize weights and biases with larger values for more significant gradients."""
+    
+    for module in model.modules():
+        with torch.no_grad():
+            # Initialize weights with larger values if enabled
+            if INIT_LARGER_WEIGHTS and hasattr(module, 'weight') and module.weight is not None:
+                if isinstance(module, (nn.Linear, nn.Conv1d, nn.Conv2d)):
+                    # Use larger standard deviation for more significant gradients
+                    # Standard PyTorch uses sqrt(1/fan_in), we use 3x that
+                    fan_in = module.weight.shape[1] if len(module.weight.shape) > 1 else module.weight.shape[0]
+                    std = 3.0 / torch.sqrt(torch.tensor(fan_in, dtype=torch.float32))
+                    module.weight.normal_(0.0, std)
+                elif isinstance(module, (nn.BatchNorm1d, nn.BatchNorm2d)):
+                    # BatchNorm weight (gamma): start closer to 1 but with variation
+                    module.weight.uniform_(0.8, 1.2)
+                    
+            # Initialize bias with random values if enabled  
+            if INIT_RANDOM_BIASES and hasattr(module, 'bias') and module.bias is not None:
+                if isinstance(module, (nn.Linear, nn.Conv1d, nn.Conv2d)):
+                    # Positive bias range for more activations
+                    module.bias.uniform_(0.0, 0.5)
+                elif isinstance(module, (nn.BatchNorm1d, nn.BatchNorm2d)):
+                    # BatchNorm bias (beta): small random values around 0
+                    module.bias.uniform_(-0.1, 0.1)
+
+
 def check_pass(abs_err: float, rel_err: float, abs_tol: float, rel_tol: float) -> bool:
-    """Pass if EITHER absolute error < abs_tol OR relative error < rel_tol."""
-    return abs_err < abs_tol or rel_err < rel_tol
+    """Pass if BOTH absolute error < abs_tol AND relative error < rel_tol."""
+    return abs_err < abs_tol and rel_err < rel_tol
 
 
 def test_model_functional(
@@ -310,18 +439,21 @@ def test_model_functional(
     cache = LayerCache()
 
     try:
-        model = copy.deepcopy(model)
         model.eval()
+        init_random_biases(model)
 
         # =====================================================================
-        # Phase 1: Original forward/backward with hooks
+        # Phase 1: Replace functional calls with modules
         # =====================================================================
-        model_orig = copy.deepcopy(model)
-        model_orig.eval()
-        cache.register_orig_hooks(model_orig)
+        model = replace_functional_with_modules(model, inplace=True)
+
+        # =====================================================================
+        # Phase 2: Original forward/backward with hooks (BEFORE DC patching)
+        # =====================================================================
+        cache.register_orig_hooks(model)
 
         x_orig = x.clone().requires_grad_(True)
-        orig_out = model_orig(x_orig)
+        orig_out = model(x_orig)
         target_grad = torch.randn_like(orig_out)
         orig_out.backward(target_grad)
         grad_orig = x_orig.grad.clone()
@@ -329,16 +461,15 @@ def test_model_functional(
         cache._remove_hooks()
 
         # =====================================================================
-        # Phase 2: DC forward/backward using FUNCTIONAL API
+        # Phase 3: DC forward/backward using FUNCTIONAL API
         # =====================================================================
-        model_dc = copy.deepcopy(model)
-        model_dc = prepare_model_for_dc(model_dc)
-        cache.register_dc_hooks(model_dc)
+        model = prepare_model_for_dc(model)
+        cache.register_dc_hooks(model)
 
         # Functional API: init_catted is preprocessing (detached)
         x_cat = init_catted(x, InputMode.CENTER)
-        out_cat = model_dc(x_cat)
-        dc_out = reconstruct_output(out_cat, beta=1.0)
+        out_cat = model(x_cat)
+        dc_out = reconstruct_output(out_cat)
         dc_out.backward(target_grad)
 
         # Get sensitivities and reconstruct gradient
@@ -346,7 +477,7 @@ def test_model_functional(
         grad_dc = sens.reconstruct_gradient()
 
         cache._remove_hooks()
-        unpatch_model(model_dc)
+        unpatch_model(model)
 
         # =====================================================================
         # Compute layer-wise errors
@@ -429,18 +560,21 @@ def test_model_context_manager(
     cache = LayerCache()
 
     try:
-        model = copy.deepcopy(model)
         model.eval()
+        init_random_biases(model)
 
         # =====================================================================
-        # Phase 1: Original forward/backward with hooks
+        # Phase 1: Replace functional calls with modules
         # =====================================================================
-        model_orig = copy.deepcopy(model)
-        model_orig.eval()
-        cache.register_orig_hooks(model_orig)
+        model = replace_functional_with_modules(model, inplace=True)
+
+        # =====================================================================
+        # Phase 2: Original forward/backward with hooks (BEFORE DC patching)
+        # =====================================================================
+        cache.register_orig_hooks(model)
 
         x_orig = x.clone().requires_grad_(True)
-        orig_out = model_orig(x_orig)
+        orig_out = model(x_orig)
         target_grad = torch.randn_like(orig_out)
         orig_out.backward(target_grad)
         grad_orig = x_orig.grad.clone()
@@ -448,13 +582,12 @@ def test_model_context_manager(
         cache._remove_hooks()
 
         # =====================================================================
-        # Phase 2: DC forward/backward using CONTEXT MANAGER API
+        # Phase 3: DC forward/backward using CONTEXT MANAGER API
         # =====================================================================
-        model_dc = copy.deepcopy(model)
-        model_dc = prepare_model_for_dc(model_dc)
-        cache.register_dc_hooks(model_dc)
+        model = prepare_model_for_dc(model)
+        cache.register_dc_hooks(model)
 
-        with dc_forward(model_dc, x, beta=1.0) as dc:
+        with dc_forward(model, x, beta=1.0) as dc:
             dc_out = dc.output
             dc_out.backward(target_grad)
 
@@ -463,7 +596,7 @@ def test_model_context_manager(
         input_grad_raw = dc.input_4.grad
 
         cache._remove_hooks()
-        unpatch_model(model_dc)
+        unpatch_model(model)
 
         # =====================================================================
         # Compute layer-wise errors
@@ -662,16 +795,47 @@ def _print_result(result: TestResult, show_layers: bool = True) -> None:
 
     if show_layers and result.layer_results:
         print()
-        print(f"  {'Layer':<35} {'Type':<15} {'Fwd Abs':<10} {'Fwd Rel':<10} {'Bwd Abs':<10} {'Bwd Rel':<10}")
-        print(f"  {'-'*90}")
+        # Build header dynamically based on configuration
+        header = f"  {'Layer':<35} {'Type':<15} {'Fwd Abs':<10} {'Fwd Rel':<10} {'Bwd Abs':<10} {'Bwd Rel':<10}"
+        header_len = 90
+        
+        if SHOW_SENSITIVITY_NORMS:
+            header += f" {'||δ_pp||':<10} {'||δ_np||':<10} {'||δ_pn||':<10} {'||δ_nn||':<10}"
+            header_len += 40
+            
+        if SHOW_ACTIVATION_NORMS:
+            header += f" {'||pos||':<10} {'||neg||':<10}"
+            header_len += 20
+            
+        if SHOW_ORIGINAL_GRAD_NORMS:
+            header += f" {'||∇_orig||':<10}"
+            header_len += 10
+            
+        print(header)
+        print(f"  {'-'*header_len}")
 
         for lr in result.layer_results:
-            layer_name = lr.name[:33] + '..' if len(lr.name) > 35 else lr.name
+            # Use display_name for Add modules, otherwise use regular name
+            display_name = lr.display_name if lr.display_name and lr.display_name != lr.name else lr.name
+            layer_name = display_name[:33] + '..' if len(display_name) > 35 else display_name
             fwd_mark = "" if lr.fwd_pass else "*"
             bwd_mark = "" if lr.bwd_pass else "*"
-            print(f"  {layer_name:<35} {lr.module_type:<15} "
-                  f"{lr.fwd_abs_error:<10.2e}{fwd_mark} {lr.fwd_rel_error:<10.2e} "
-                  f"{lr.bwd_abs_error:<10.2e}{bwd_mark} {lr.bwd_rel_error:<10.2e}")
+            # Build row dynamically based on configuration
+            row = (f"  {layer_name:<35} {lr.module_type:<15} "
+                   f"{lr.fwd_abs_error:<10.2e}{fwd_mark} {lr.fwd_rel_error:<10.2e} "
+                   f"{lr.bwd_abs_error:<10.2e}{bwd_mark} {lr.bwd_rel_error:<10.2e}")
+            
+            if SHOW_SENSITIVITY_NORMS:
+                row += (f" {lr.sens_pp_norm:<10.2e} {lr.sens_np_norm:<10.2e} "
+                        f"{lr.sens_pn_norm:<10.2e} {lr.sens_nn_norm:<10.2e}")
+                        
+            if SHOW_ACTIVATION_NORMS:
+                row += f" {lr.act_pos_norm:<10.2e} {lr.act_neg_norm:<10.2e}"
+                
+            if SHOW_ORIGINAL_GRAD_NORMS:
+                row += f" {lr.orig_grad_norm:<10.2e}"
+                
+            print(row)
 
     print()
 
