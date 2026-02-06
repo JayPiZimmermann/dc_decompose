@@ -69,7 +69,7 @@ ALIGN_BACKWARD = True              # Align backward pass (DC sensitivities = ori
 
 # Sensitivity shift alpha - reduces sensitivity magnitudes for numerical stability
 # Set to a float for constant alpha (e.g., 0.5), or "frobenius" to compute from weights
-ALPHA = 0.0  # 0.0 = disabled, "frobenius" = compute from Frobenius norm, float = constant
+ALPHA = 0.35  # 0.0 = disabled, "frobenius" = compute from Frobenius norm, float = constant
 
 
 # =============================================================================
