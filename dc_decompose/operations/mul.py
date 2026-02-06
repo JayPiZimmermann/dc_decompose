@@ -64,7 +64,7 @@ class DCMulFunction(torch.autograd.Function):
 
             return (new_pp_A, new_np_A, new_pn_A, new_nn_A), (new_pp_B, new_np_B, new_pn_B, new_nn_B)
 
-        return BackwardBuilder.run_multi(ctx, grad_4, compute, num_outputs=2, num_extra_returns=3)
+        return BackwardBuilder.run_multi(ctx, grad_4, compute, num_outputs=2, num_extra_returns=4)
 
 
 class DCScalarMulFunction(torch.autograd.Function):
@@ -117,7 +117,14 @@ def dc_forward_mul(module: DCMul, A: Tensor, B: Optional[Tensor] = None) -> Tens
             cache, layer_name, alpha,
         )
     elif B is not None:
-        operand_4 = make_output_4(F.relu(B), F.relu(-B))
+        # Check if B is already in DC format (same batch size as A)
+        # If so, use it directly. Otherwise, wrap it.
+        if B.shape[0] == A.shape[0]:
+            # B is already in DC format (4*batch)
+            operand_4 = B
+        else:
+            # B is a regular tensor, wrap it in DC format
+            operand_4 = make_output_4(F.relu(B), F.relu(-B))
         return DCMulFunction.apply(
             A, operand_4,
             getattr(module, DC_IS_OUTPUT_LAYER, False),
