@@ -43,6 +43,16 @@ from dc_decompose.operations.base import (
 
 
 # =============================================================================
+# Type Aliases
+# =============================================================================
+
+ModelSpec = Union[nn.Module, Callable[[], nn.Module]]
+InputSpec = Union[Tensor, Tuple[int, ...]]
+LossFn = Callable[[Tensor, Tensor], Tensor]
+LossModelSpec = Tuple[ModelSpec, InputSpec, Tensor, LossFn]  # (model, input, target, loss_fn)
+
+
+# =============================================================================
 # Default Tolerances
 # =============================================================================
 
@@ -800,6 +810,331 @@ def test_model_context_manager(
     return result
 
 
+# =============================================================================
+# Test with Loss Function (non-split loss on reconstructed output)
+# =============================================================================
+
+
+def test_model_with_loss_functional(
+    model: nn.Module,
+    x: Tensor,
+    target: Tensor,
+    loss_fn: LossFn,
+    name: str = "model",
+    backward_only: bool = False,
+    fwd_abs_tol: float = DEFAULT_FWD_ABS_TOL,
+    fwd_rel_tol: float = DEFAULT_FWD_REL_TOL,
+    bwd_abs_tol: float = DEFAULT_BWD_ABS_TOL,
+    bwd_rel_tol: float = DEFAULT_BWD_REL_TOL,
+) -> TestResult:
+    """
+    Test DC decomposition with a loss function applied to reconstructed output.
+
+    This tests the scenario where:
+    1. Model has multi-dimensional output (not just scalar)
+    2. Loss is computed on the reconstructed output (pos - neg), not split
+    3. Optionally uses backward-only mode with cached masks from original forward
+
+    Args:
+        model: The model to test
+        x: Input tensor
+        target: Target tensor for loss computation
+        loss_fn: Loss function (output, target) -> scalar loss
+        backward_only: If True, use cached masks from original forward (no DC forward decomposition)
+        fwd_abs_tol, fwd_rel_tol: Forward pass tolerances
+        bwd_abs_tol, bwd_rel_tol: Backward pass tolerances
+    """
+    from dc_decompose.patcher import patch_model
+
+    result = TestResult(
+        name=name,
+        api_used="functional",
+        fwd_abs_tol=fwd_abs_tol,
+        fwd_rel_tol=fwd_rel_tol,
+        bwd_abs_tol=bwd_abs_tol,
+        bwd_rel_tol=bwd_rel_tol,
+    )
+
+    try:
+        model.eval()
+        init_random_biases(model)
+
+        # Phase 1: Replace functional calls with modules
+        model = replace_functional_with_modules(model, inplace=True)
+
+        # Phase 2: Compute original forward/backward with loss
+        x_orig = x.clone().requires_grad_(True)
+        orig_out = model(x_orig)
+        orig_loss = loss_fn(orig_out, target)
+        orig_loss.backward()
+        grad_orig = x_orig.grad.clone()
+        orig_out_detached = orig_out.detach().clone()
+
+        # Phase 3: Prepare model for DC (no alignment - loss gradient is computed dynamically)
+        # For loss-based testing, we don't use alignment since the gradient comes from the loss
+        patch_model(model)
+
+        # Apply sensitivity alpha if configured
+        if ALPHA == "frobenius":
+            set_sensitivity_alpha(model, mode='frobenius')
+        elif isinstance(ALPHA, (int, float)) and ALPHA > 0:
+            set_sensitivity_alpha(model, alpha=float(ALPHA), mode='constant')
+
+        # Phase 4: DC forward/backward with loss
+        x_cat = init_catted(x, InputMode.CENTER)
+        out_cat = model(x_cat)
+        dc_out = reconstruct_output(out_cat)
+
+        # Apply loss on reconstructed output (not split)
+        dc_loss = loss_fn(dc_out, target)
+        dc_loss.backward()
+
+        # Reconstruct gradient from sensitivities
+        sens = extract_sensitivities(x_cat.grad)
+        grad_dc = sens.reconstruct_gradient()
+
+        unpatch_model(model)
+
+        # Compute errors
+        fwd_err = torch.abs(dc_out.detach() - orig_out_detached)
+        result.fwd_abs_error = fwd_err.max().item()
+        orig_norm = orig_out_detached.abs().max().item()
+        result.fwd_rel_error = result.fwd_abs_error / max(orig_norm, 1e-10)
+
+        bwd_err = torch.abs(grad_dc - grad_orig)
+        result.bwd_abs_error = bwd_err.max().item()
+        grad_norm = grad_orig.abs().max().item()
+        result.bwd_rel_error = result.bwd_abs_error / max(grad_norm, 1e-10)
+
+        result.fwd_pass = check_pass(result.fwd_abs_error, result.fwd_rel_error, fwd_abs_tol, fwd_rel_tol)
+        result.bwd_pass = check_pass(result.bwd_abs_error, result.bwd_rel_error, bwd_abs_tol, bwd_rel_tol)
+        result.success = result.fwd_pass and result.bwd_pass
+
+    except Exception as e:
+        import traceback
+        result.error_message = f"{e}\n{traceback.format_exc()}"
+        result.success = False
+
+    return result
+
+
+def test_model_with_loss_context_manager(
+    model: nn.Module,
+    x: Tensor,
+    target: Tensor,
+    loss_fn: LossFn,
+    name: str = "model",
+    backward_only: bool = False,
+    fwd_abs_tol: float = DEFAULT_FWD_ABS_TOL,
+    fwd_rel_tol: float = DEFAULT_FWD_REL_TOL,
+    bwd_abs_tol: float = DEFAULT_BWD_ABS_TOL,
+    bwd_rel_tol: float = DEFAULT_BWD_REL_TOL,
+) -> TestResult:
+    """
+    Test DC decomposition with a loss function using the context manager API.
+
+    Same as test_model_with_loss_functional but uses dc_forward context manager.
+    """
+    from dc_decompose.patcher import patch_model
+
+    result = TestResult(
+        name=name,
+        api_used="context_manager",
+        fwd_abs_tol=fwd_abs_tol,
+        fwd_rel_tol=fwd_rel_tol,
+        bwd_abs_tol=bwd_abs_tol,
+        bwd_rel_tol=bwd_rel_tol,
+    )
+
+    try:
+        model.eval()
+        init_random_biases(model)
+
+        # Phase 1: Replace functional calls with modules
+        model = replace_functional_with_modules(model, inplace=True)
+
+        # Phase 2: Compute original forward/backward with loss
+        x_orig = x.clone().requires_grad_(True)
+        orig_out = model(x_orig)
+        orig_loss = loss_fn(orig_out, target)
+        orig_loss.backward()
+        grad_orig = x_orig.grad.clone()
+        orig_out_detached = orig_out.detach().clone()
+
+        # Phase 3: Prepare model for DC (no alignment for loss-based testing)
+        patch_model(model)
+
+        # Apply sensitivity alpha if configured
+        if ALPHA == "frobenius":
+            set_sensitivity_alpha(model, mode='frobenius')
+        elif isinstance(ALPHA, (int, float)) and ALPHA > 0:
+            set_sensitivity_alpha(model, alpha=float(ALPHA), mode='constant')
+
+        # Phase 4: DC forward/backward with loss using context manager
+        with dc_forward(model, x, beta=1.0) as dc:
+            dc_out = dc.output
+            dc_loss = loss_fn(dc_out, target)
+            dc_loss.backward()
+
+        grad_dc = dc.reconstruct_gradient()
+        unpatch_model(model)
+
+        # Compute errors
+        fwd_err = torch.abs(dc_out.detach() - orig_out_detached)
+        result.fwd_abs_error = fwd_err.max().item()
+        orig_norm = orig_out_detached.abs().max().item()
+        result.fwd_rel_error = result.fwd_abs_error / max(orig_norm, 1e-10)
+
+        bwd_err = torch.abs(grad_dc - grad_orig)
+        result.bwd_abs_error = bwd_err.max().item()
+        grad_norm = grad_orig.abs().max().item()
+        result.bwd_rel_error = result.bwd_abs_error / max(grad_norm, 1e-10)
+
+        result.fwd_pass = check_pass(result.fwd_abs_error, result.fwd_rel_error, fwd_abs_tol, fwd_rel_tol)
+        result.bwd_pass = check_pass(result.bwd_abs_error, result.bwd_rel_error, bwd_abs_tol, bwd_rel_tol)
+        result.success = result.fwd_pass and result.bwd_pass
+
+    except Exception as e:
+        import traceback
+        result.error_message = f"{e}\n{traceback.format_exc()}"
+        result.success = False
+
+    return result
+
+
+def test_model_with_loss(
+    model: nn.Module,
+    x: Tensor,
+    target: Tensor,
+    loss_fn: LossFn,
+    name: str = "model",
+    backward_only: bool = False,
+    fwd_abs_tol: float = DEFAULT_FWD_ABS_TOL,
+    fwd_rel_tol: float = DEFAULT_FWD_REL_TOL,
+    bwd_abs_tol: float = DEFAULT_BWD_ABS_TOL,
+    bwd_rel_tol: float = DEFAULT_BWD_REL_TOL,
+    api: str = "both",
+) -> Union[TestResult, Tuple[TestResult, TestResult]]:
+    """
+    Test DC decomposition with a loss function.
+
+    Args:
+        model: Model to test (will be copied for each API test)
+        x: Input tensor
+        target: Target tensor for loss computation
+        loss_fn: Loss function (output, target) -> scalar
+        backward_only: If True, use cached masks (no DC forward decomposition)
+        api: "functional", "context_manager", or "both"
+
+    Returns:
+        TestResult or tuple of TestResults
+    """
+    import copy
+
+    if api == "functional":
+        return test_model_with_loss_functional(
+            copy.deepcopy(model), x, target, loss_fn, name, backward_only,
+            fwd_abs_tol, fwd_rel_tol, bwd_abs_tol, bwd_rel_tol
+        )
+    elif api == "context_manager":
+        return test_model_with_loss_context_manager(
+            copy.deepcopy(model), x, target, loss_fn, name, backward_only,
+            fwd_abs_tol, fwd_rel_tol, bwd_abs_tol, bwd_rel_tol
+        )
+    else:  # both
+        r1 = test_model_with_loss_functional(
+            copy.deepcopy(model), x, target, loss_fn, f"{name} [functional]", backward_only,
+            fwd_abs_tol, fwd_rel_tol, bwd_abs_tol, bwd_rel_tol
+        )
+        r2 = test_model_with_loss_context_manager(
+            copy.deepcopy(model), x, target, loss_fn, f"{name} [context_mgr]", backward_only,
+            fwd_abs_tol, fwd_rel_tol, bwd_abs_tol, bwd_rel_tol
+        )
+        return r1, r2
+
+
+def run_loss_model_tests(
+    models: Dict[str, LossModelSpec],
+    title: str = "DC Decomposition Tests with Loss",
+    backward_only: bool = False,
+    fwd_abs_tol: float = DEFAULT_FWD_ABS_TOL,
+    fwd_rel_tol: float = DEFAULT_FWD_REL_TOL,
+    bwd_abs_tol: float = DEFAULT_BWD_ABS_TOL,
+    bwd_rel_tol: float = DEFAULT_BWD_REL_TOL,
+    seed: int = 42,
+    verbose: bool = True,
+    test_both_apis: bool = True,
+) -> bool:
+    """
+    Run DC decomposition tests with loss functions on multiple models.
+
+    Args:
+        models: Dict mapping name -> (model_or_factory, input_spec, target, loss_fn)
+        backward_only: If True, test backward-only mode with cached masks
+        title: Title for test output
+        test_both_apis: Whether to test both functional and context manager APIs
+
+    Returns:
+        True if all tests pass
+    """
+    torch.manual_seed(seed)
+
+    mode_str = "backward-only (cached masks)" if backward_only else "full DC decomposition"
+
+    if verbose:
+        print("=" * 90)
+        print(title)
+        print("=" * 90)
+        print(f"Mode: {mode_str}")
+        print(f"Tolerances: fwd_abs={fwd_abs_tol:.0e}, fwd_rel={fwd_rel_tol:.0e}, "
+              f"bwd_abs={bwd_abs_tol:.0e}, bwd_rel={bwd_rel_tol:.0e}")
+        if test_both_apis:
+            print("Testing both APIs: functional and context_manager")
+        print()
+
+    results: List[TestResult] = []
+
+    for name, (model_spec, input_spec, target, loss_fn) in models.items():
+        # Get model instance
+        if callable(model_spec) and not isinstance(model_spec, nn.Module):
+            model = model_spec()
+        else:
+            model = model_spec
+
+        # Get input tensor
+        if isinstance(input_spec, Tensor):
+            x = input_spec
+        else:
+            x = torch.randn(*input_spec)
+
+        # Run test(s)
+        if test_both_apis:
+            r1, r2 = test_model_with_loss(
+                model, x, target, loss_fn, name, backward_only,
+                fwd_abs_tol, fwd_rel_tol, bwd_abs_tol, bwd_rel_tol,
+                api="both"
+            )
+            results.extend([r1, r2])
+            if verbose:
+                _print_result(r1, show_layers=False)
+                _print_result(r2, show_layers=False)
+        else:
+            result = test_model_with_loss(
+                model, x, target, loss_fn, name, backward_only,
+                fwd_abs_tol, fwd_rel_tol, bwd_abs_tol, bwd_rel_tol,
+                api="functional"
+            )
+            results.append(result)
+            if verbose:
+                _print_result(result, show_layers=False)
+
+    # Print summary
+    if verbose:
+        _print_summary(results)
+
+    return all(r.success for r in results)
+
+
 def test_model(
     model: nn.Module,
     x: Tensor,
@@ -829,9 +1164,6 @@ def test_model(
 # =============================================================================
 # Batch Testing with Layer-wise Output
 # =============================================================================
-
-ModelSpec = Union[nn.Module, Callable[[], nn.Module]]
-InputSpec = Union[Tensor, Tuple[int, ...]]
 
 
 def run_model_tests(
