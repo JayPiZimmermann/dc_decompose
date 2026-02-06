@@ -19,9 +19,14 @@ Usage:
 import torch
 import torch.nn as nn
 from contextlib import contextmanager
-from typing import Optional, List
+from dataclasses import dataclass
+from typing import Optional, List, TYPE_CHECKING
+from torch import Tensor
 
 from .operations.base import DC_ENABLED, DC_ORIGINAL_FORWARD, DC_IS_OUTPUT_LAYER
+
+if TYPE_CHECKING:
+    from .alignment_cache import AlignmentCache, AlignmentMode
 from .operations.linear import patch_linear, unpatch_linear
 from .operations.conv import patch_conv2d, unpatch_conv2d, patch_conv1d, unpatch_conv1d
 from .operations.conv_transpose import patch_conv_transpose1d, patch_conv_transpose2d, unpatch_conv_transpose1d, unpatch_conv_transpose2d
@@ -372,6 +377,10 @@ def prepare_model_for_dc(
     relu_mode: str = 'max',
     backprop_mode: str = 'sum',
     beta: float = 1.0,
+    align_forward: bool = False,
+    align_backward: bool = False,
+    x: Optional[Tensor] = None,
+    target_grad: Optional[Tensor] = None,
 ) -> nn.Module:
     """
     Prepare a model for DC decomposition in one step.
@@ -379,14 +388,19 @@ def prepare_model_for_dc(
     This function:
     1. Replaces functional calls (torch.relu, +, etc.) with module equivalents
     2. Finds the output layer (before patching, so forward pass works normally)
-    3. Patches all layers for DC decomposition
-    4. Marks the output layer for backward initialization
+    3. If alignment enabled: captures original activations/gradients
+    4. Patches all layers for DC decomposition
+    5. Marks the output layer for backward initialization
 
     Args:
         model: The PyTorch model to prepare
         relu_mode: ReLU decomposition mode ('max', 'min', 'half')
         backprop_mode: ReLU backprop mode ('standard', 'mask_diff', 'sum')
         beta: Output layer initialization parameter (default 1.0)
+        align_forward: If True, align DC forward to match original activations
+        align_backward: If True, align DC backward to match original gradients
+        x: Input tensor (required if alignment is enabled)
+        target_grad: Target gradient for backward (required if align_backward=True)
 
     Returns:
         The prepared model (same instance after in-place modifications,
@@ -397,6 +411,12 @@ def prepare_model_for_dc(
         x_cat = init_catted(x, InputMode.CENTER)
         out_cat = model(x_cat)
         out = reconstruct_output(out_cat)
+
+    Example with alignment:
+        model = prepare_model_for_dc(
+            model, align_forward=True, align_backward=True,
+            x=x, target_grad=target_grad
+        )
     """
     from .functional_replacer import make_dc_compatible
 
@@ -407,14 +427,154 @@ def prepare_model_for_dc(
     # Step 2: Find output layer BEFORE patching (so forward pass works normally)
     output_layer = find_output_layer(model)
 
-    # Step 3: Patch all layers
+    # Step 3: Create and populate alignment cache if alignment is enabled
+    alignment_cache = None
+    if align_forward or align_backward:
+        if x is None:
+            raise ValueError("x is required when alignment is enabled")
+        if align_backward and target_grad is None:
+            raise ValueError("target_grad is required when align_backward=True")
+
+        from .alignment_cache import AlignmentCache, AlignmentMode
+
+        # Determine mode based on flags
+        if align_forward and align_backward:
+            mode = AlignmentMode.BOTH
+        elif align_forward:
+            mode = AlignmentMode.FORWARD_ONLY
+        else:
+            mode = AlignmentMode.BACKWARD_ONLY
+
+        alignment_cache = AlignmentCache(mode=mode)
+        alignment_cache.capture_original(
+            model, x, target_grad,
+            capture_forward=align_forward,
+            capture_backward=align_backward,
+        )
+        alignment_cache.attach_to_model(model)
+
+    # Step 4: Patch all layers
     patch_model(model, relu_mode=relu_mode, backprop_mode=backprop_mode)
 
-    # Step 4: Mark output layer
+    # Step 5: Mark output layer
     if output_layer is not None:
         mark_output_layer(output_layer, beta)
 
     return model
+
+
+# =============================================================================
+# Aligned DC Forward Context Manager
+# =============================================================================
+
+@dataclass
+class AlignedDCContext:
+    """Context object for aligned_dc_forward."""
+    cache: 'AlignmentCache'
+    original_output: Tensor
+    _x_cat: Optional[Tensor] = None
+    _output: Optional[Tensor] = None
+
+    @property
+    def output(self) -> Tensor:
+        """The reconstructed DC output (pos - neg)."""
+        if self._output is None:
+            raise RuntimeError("Output not available")
+        return self._output
+
+    @property
+    def input_4(self) -> Tensor:
+        """The [4*batch] input tensor (for accessing .grad after backward)."""
+        if self._x_cat is None:
+            raise RuntimeError("Input not available")
+        return self._x_cat
+
+
+@contextmanager
+def aligned_dc_forward(
+    model: nn.Module,
+    x: Tensor,
+    mode: Optional['AlignmentMode'] = None,
+    target_grad: Optional[Tensor] = None,
+    relu_mode: str = 'max',
+    backprop_mode: str = 'sum',
+):
+    """
+    Context manager for DC forward with alignment correction.
+
+    This provides a convenient API that:
+    1. Replaces functional calls in the model
+    2. Captures original activations/gradients (before DC)
+    3. Patches the model for DC decomposition
+    4. Runs DC forward with automatic alignment
+
+    Usage:
+        with aligned_dc_forward(model, x, mode=AlignmentMode.BOTH) as ctx:
+            out = ctx.output
+            loss = criterion(out, target)
+            loss.backward()
+
+        # Get correction statistics
+        stats = ctx.cache.get_correction_stats()
+
+    Args:
+        model: PyTorch model (will be modified in place)
+        x: Input tensor
+        mode: Alignment mode (default: AlignmentMode.BOTH)
+        target_grad: Target gradient for backward capture (optional)
+        relu_mode: ReLU decomposition mode ('max', 'min', 'half')
+        backprop_mode: ReLU backprop mode ('standard', 'mask_diff', 'sum')
+
+    Yields:
+        AlignedDCContext with output and cache
+
+    Note:
+        The model is unpatched when the context exits. Make a copy if
+        you need to keep the patched version.
+    """
+    from .alignment_cache import AlignmentCache, AlignmentMode
+    from .functional_replacer import make_dc_compatible
+    from .operations.base import init_catted, reconstruct_output
+
+    # Default mode
+    if mode is None:
+        mode = AlignmentMode.BOTH
+
+    # Step 1: Replace functional calls
+    model = make_dc_compatible(model)
+    model.eval()
+
+    # Step 2: Create cache and capture original behavior
+    cache = AlignmentCache(mode=mode)
+    capture_forward = mode in (AlignmentMode.FORWARD_ONLY, AlignmentMode.BOTH)
+    capture_backward = mode in (AlignmentMode.BACKWARD_ONLY, AlignmentMode.BOTH)
+
+    orig_output = cache.capture_original(
+        model, x, target_grad,
+        capture_forward=capture_forward,
+        capture_backward=capture_backward,
+    )
+
+    # Step 3: Prepare for DC
+    output_layer = find_output_layer(model)
+    cache.attach_to_model(model)
+    patch_model(model, relu_mode=relu_mode, backprop_mode=backprop_mode)
+    if output_layer:
+        mark_output_layer(output_layer)
+
+    # Step 4: Create result container
+    ctx = AlignedDCContext(cache=cache, original_output=orig_output)
+
+    # Step 5: Run DC forward
+    ctx._x_cat = init_catted(x)
+    out_cat = model(ctx._x_cat)
+    ctx._output = reconstruct_output(out_cat)
+
+    try:
+        yield ctx
+    finally:
+        cache.detach_from_model(model)
+        unpatch_model(model)
 
 
 # =============================================================================

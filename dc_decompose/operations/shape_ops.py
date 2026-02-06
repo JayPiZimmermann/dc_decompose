@@ -9,7 +9,11 @@ import torch.nn as nn
 from torch import Tensor
 from typing import Tuple, Union, List
 
-from .base import split_input_4, make_output_4, make_grad_4, init_backward, DC_ENABLED, DC_ORIGINAL_FORWARD, DC_IS_OUTPUT_LAYER
+from .base import DC_IS_OUTPUT_LAYER
+from .patch_builder import (
+    ForwardBuilder, BackwardBuilder, get_cache_info,
+    create_patch_function, create_unpatch_function,
+)
 
 
 # =============================================================================
@@ -20,57 +24,38 @@ class DCFlattenFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, input_4: Tensor, start_dim: int, end_dim: int,
-                is_output_layer: bool) -> Tensor:
-        pos, neg = split_input_4(input_4)
+                is_output_layer: bool, cache, layer_name) -> Tensor:
+        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name)
+        pos, neg = fb.split_input(input_4)
 
         ctx.input_shape = pos.shape
-        ctx.is_output_layer = is_output_layer
-        
 
         out_pos = torch.flatten(pos, start_dim, end_dim)
         out_neg = torch.flatten(neg, start_dim, end_dim)
 
-        return make_output_4(out_pos, out_neg)
+        return fb.build_output(out_pos, out_neg, recenter=False)
 
     @staticmethod
-    def backward(ctx, grad_4: Tensor) -> Tuple[Tensor, None, None, None, None]:
-        delta_pp, delta_np, delta_pn, delta_nn = init_backward(
-            grad_4, ctx.is_output_layer)
+    def backward(ctx, grad_4: Tensor) -> Tuple[Tensor, None, None, None, None, None]:
+        def compute(ctx, delta_pp, delta_np, delta_pn, delta_nn):
+            new_pp = delta_pp.view(ctx.input_shape)
+            new_np = delta_np.view(ctx.input_shape)
+            new_pn = delta_pn.view(ctx.input_shape)
+            new_nn = delta_nn.view(ctx.input_shape)
+            return new_pp, new_np, new_pn, new_nn
 
-        new_pp = delta_pp.view(ctx.input_shape)
-        new_np = delta_np.view(ctx.input_shape)
-        new_pn = delta_pn.view(ctx.input_shape)
-        new_nn = delta_nn.view(ctx.input_shape)
-
-        return make_grad_4(new_pp, new_np, new_pn, new_nn), None, None, None, None
+        return BackwardBuilder.run(ctx, grad_4, compute, num_extra_returns=5)
 
 
 def dc_forward_flatten(m: nn.Flatten, x: Tensor) -> Tensor:
+    cache, layer_name = get_cache_info(m)
     return DCFlattenFunction.apply(x, m.start_dim, m.end_dim,
-                                    getattr(m, DC_IS_OUTPUT_LAYER, False))
+                                    getattr(m, DC_IS_OUTPUT_LAYER, False),
+                                    cache, layer_name)
 
 
-def patch_flatten(module: nn.Flatten) -> None:
-    if hasattr(module, DC_ORIGINAL_FORWARD): return
-    setattr(module, DC_ORIGINAL_FORWARD, module.forward)
-    setattr(module, DC_ENABLED, True)
-    setattr(module, DC_IS_OUTPUT_LAYER, False)
-    
-
-    def patched(x):
-        if getattr(module, DC_ENABLED, False):
-            return dc_forward_flatten(module, x)
-        else:
-            return getattr(module, DC_ORIGINAL_FORWARD)(x)
-
-    module.forward = patched
-
-
-def unpatch_flatten(module: nn.Flatten) -> None:
-    if hasattr(module, DC_ORIGINAL_FORWARD):
-        module.forward = getattr(module, DC_ORIGINAL_FORWARD)
-        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER]:
-            if hasattr(module, a): delattr(module, a)
+patch_flatten = create_patch_function(dc_forward_flatten)
+unpatch_flatten = create_unpatch_function()
 
 
 # =============================================================================
@@ -81,59 +66,41 @@ class DCUnflattenFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, input_4: Tensor, dim: int, unflattened_size: Tuple[int, ...],
-                is_output_layer: bool) -> Tensor:
-        pos, neg = split_input_4(input_4)
+                is_output_layer: bool, cache, layer_name) -> Tensor:
+        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name)
+        pos, neg = fb.split_input(input_4)
 
         ctx.input_shape = pos.shape
         ctx.dim = dim
-        ctx.is_output_layer = is_output_layer
-        
 
         out_pos = pos.unflatten(dim, unflattened_size)
         out_neg = neg.unflatten(dim, unflattened_size)
 
-        return make_output_4(out_pos, out_neg)
+        return fb.build_output(out_pos, out_neg, recenter=False)
 
     @staticmethod
-    def backward(ctx, grad_4: Tensor) -> Tuple[Tensor, None, None, None, None]:
-        delta_pp, delta_np, delta_pn, delta_nn = init_backward(
-            grad_4, ctx.is_output_layer)
+    def backward(ctx, grad_4: Tensor) -> Tuple[Tensor, None, None, None, None, None]:
+        def compute(ctx, delta_pp, delta_np, delta_pn, delta_nn):
+            # Flatten back to original shape
+            end_dim = ctx.dim + len(delta_pp.shape) - len(ctx.input_shape)
+            new_pp = delta_pp.flatten(ctx.dim, end_dim)
+            new_np = delta_np.flatten(ctx.dim, end_dim)
+            new_pn = delta_pn.flatten(ctx.dim, end_dim)
+            new_nn = delta_nn.flatten(ctx.dim, end_dim)
+            return new_pp, new_np, new_pn, new_nn
 
-        # Flatten back to original shape
-        new_pp = delta_pp.flatten(ctx.dim, ctx.dim + len(grad_4.shape) - len(ctx.input_shape))
-        new_np = delta_np.flatten(ctx.dim, ctx.dim + len(grad_4.shape) - len(ctx.input_shape))
-        new_pn = delta_pn.flatten(ctx.dim, ctx.dim + len(grad_4.shape) - len(ctx.input_shape))
-        new_nn = delta_nn.flatten(ctx.dim, ctx.dim + len(grad_4.shape) - len(ctx.input_shape))
-
-        return make_grad_4(new_pp, new_np, new_pn, new_nn), None, None, None, None
+        return BackwardBuilder.run(ctx, grad_4, compute, num_extra_returns=5)
 
 
 def dc_forward_unflatten(m: nn.Unflatten, x: Tensor) -> Tensor:
+    cache, layer_name = get_cache_info(m)
     return DCUnflattenFunction.apply(x, m.dim, m.unflattened_size,
-                                      getattr(m, DC_IS_OUTPUT_LAYER, False))
+                                      getattr(m, DC_IS_OUTPUT_LAYER, False),
+                                      cache, layer_name)
 
 
-def patch_unflatten(module: nn.Unflatten) -> None:
-    if hasattr(module, DC_ORIGINAL_FORWARD): return
-    setattr(module, DC_ORIGINAL_FORWARD, module.forward)
-    setattr(module, DC_ENABLED, True)
-    setattr(module, DC_IS_OUTPUT_LAYER, False)
-    
-
-    def patched(x):
-        if getattr(module, DC_ENABLED, False):
-            return dc_forward_unflatten(module, x)
-        else:
-            return getattr(module, DC_ORIGINAL_FORWARD)(x)
-
-    module.forward = patched
-
-
-def unpatch_unflatten(module: nn.Unflatten) -> None:
-    if hasattr(module, DC_ORIGINAL_FORWARD):
-        module.forward = getattr(module, DC_ORIGINAL_FORWARD)
-        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER]:
-            if hasattr(module, a): delattr(module, a)
+patch_unflatten = create_patch_function(dc_forward_unflatten)
+unpatch_unflatten = create_unpatch_function()
 
 
 # =============================================================================
@@ -155,58 +122,39 @@ class DCReshapeFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, input_4: Tensor, shape: Tuple[int, ...],
-                is_output_layer: bool) -> Tensor:
-        pos, neg = split_input_4(input_4)
+                is_output_layer: bool, cache, layer_name) -> Tensor:
+        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name)
+        pos, neg = fb.split_input(input_4)
 
         ctx.input_shape = pos.shape
-        ctx.is_output_layer = is_output_layer
-        
 
         # Adjust shape for batch dimension (shape[0] should be -1 or match)
         out_pos = pos.reshape(shape)
         out_neg = neg.reshape(shape)
 
-        return make_output_4(out_pos, out_neg)
+        return fb.build_output(out_pos, out_neg, recenter=False)
 
     @staticmethod
-    def backward(ctx, grad_4: Tensor) -> Tuple[Tensor, None, None, None]:
-        delta_pp, delta_np, delta_pn, delta_nn = init_backward(
-            grad_4, ctx.is_output_layer)
+    def backward(ctx, grad_4: Tensor) -> Tuple[Tensor, None, None, None, None]:
+        def compute(ctx, delta_pp, delta_np, delta_pn, delta_nn):
+            new_pp = delta_pp.reshape(ctx.input_shape)
+            new_np = delta_np.reshape(ctx.input_shape)
+            new_pn = delta_pn.reshape(ctx.input_shape)
+            new_nn = delta_nn.reshape(ctx.input_shape)
+            return new_pp, new_np, new_pn, new_nn
 
-        new_pp = delta_pp.reshape(ctx.input_shape)
-        new_np = delta_np.reshape(ctx.input_shape)
-        new_pn = delta_pn.reshape(ctx.input_shape)
-        new_nn = delta_nn.reshape(ctx.input_shape)
-
-        return make_grad_4(new_pp, new_np, new_pn, new_nn), None, None, None
+        return BackwardBuilder.run(ctx, grad_4, compute, num_extra_returns=4)
 
 
 def dc_forward_reshape(m: Reshape, x: Tensor) -> Tensor:
+    cache, layer_name = get_cache_info(m)
     return DCReshapeFunction.apply(x, m.shape,
-                                    getattr(m, DC_IS_OUTPUT_LAYER, False))
+                                    getattr(m, DC_IS_OUTPUT_LAYER, False),
+                                    cache, layer_name)
 
 
-def patch_reshape(module: Reshape) -> None:
-    if hasattr(module, DC_ORIGINAL_FORWARD): return
-    setattr(module, DC_ORIGINAL_FORWARD, module.forward)
-    setattr(module, DC_ENABLED, True)
-    setattr(module, DC_IS_OUTPUT_LAYER, False)
-    
-
-    def patched(x):
-        if getattr(module, DC_ENABLED, False):
-            return dc_forward_reshape(module, x)
-        else:
-            return getattr(module, DC_ORIGINAL_FORWARD)(x)
-
-    module.forward = patched
-
-
-def unpatch_reshape(module: Reshape) -> None:
-    if hasattr(module, DC_ORIGINAL_FORWARD):
-        module.forward = getattr(module, DC_ORIGINAL_FORWARD)
-        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER]:
-            if hasattr(module, a): delattr(module, a)
+patch_reshape = create_patch_function(dc_forward_reshape)
+unpatch_reshape = create_unpatch_function()
 
 
 # =============================================================================
@@ -226,31 +174,14 @@ class View(nn.Module):
 
 def dc_forward_view(m: View, x: Tensor) -> Tensor:
     # View and reshape have same behavior for DC
+    cache, layer_name = get_cache_info(m)
     return DCReshapeFunction.apply(x, m.shape,
-                                    getattr(m, DC_IS_OUTPUT_LAYER, False))
+                                    getattr(m, DC_IS_OUTPUT_LAYER, False),
+                                    cache, layer_name)
 
 
-def patch_view(module: View) -> None:
-    if hasattr(module, DC_ORIGINAL_FORWARD): return
-    setattr(module, DC_ORIGINAL_FORWARD, module.forward)
-    setattr(module, DC_ENABLED, True)
-    setattr(module, DC_IS_OUTPUT_LAYER, False)
-    
-
-    def patched(x):
-        if getattr(module, DC_ENABLED, False):
-            return dc_forward_view(module, x)
-        else:
-            return getattr(module, DC_ORIGINAL_FORWARD)(x)
-
-    module.forward = patched
-
-
-def unpatch_view(module: View) -> None:
-    if hasattr(module, DC_ORIGINAL_FORWARD):
-        module.forward = getattr(module, DC_ORIGINAL_FORWARD)
-        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER]:
-            if hasattr(module, a): delattr(module, a)
+patch_view = create_patch_function(dc_forward_view)
+unpatch_view = create_unpatch_function()
 
 
 # =============================================================================
@@ -274,13 +205,12 @@ class DCSqueezeFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, input_4: Tensor, dim: int,
-                is_output_layer: bool) -> Tensor:
-        pos, neg = split_input_4(input_4)
+                is_output_layer: bool, cache, layer_name) -> Tensor:
+        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name)
+        pos, neg = fb.split_input(input_4)
 
         ctx.input_shape = pos.shape
         ctx.dim = dim
-        ctx.is_output_layer = is_output_layer
-        
 
         if dim is None:
             out_pos = pos.squeeze()
@@ -289,47 +219,29 @@ class DCSqueezeFunction(torch.autograd.Function):
             out_pos = pos.squeeze(dim)
             out_neg = neg.squeeze(dim)
 
-        return make_output_4(out_pos, out_neg)
+        return fb.build_output(out_pos, out_neg, recenter=False)
 
     @staticmethod
-    def backward(ctx, grad_4: Tensor) -> Tuple[Tensor, None, None, None]:
-        delta_pp, delta_np, delta_pn, delta_nn = init_backward(
-            grad_4, ctx.is_output_layer)
+    def backward(ctx, grad_4: Tensor) -> Tuple[Tensor, None, None, None, None]:
+        def compute(ctx, delta_pp, delta_np, delta_pn, delta_nn):
+            new_pp = delta_pp.view(ctx.input_shape)
+            new_np = delta_np.view(ctx.input_shape)
+            new_pn = delta_pn.view(ctx.input_shape)
+            new_nn = delta_nn.view(ctx.input_shape)
+            return new_pp, new_np, new_pn, new_nn
 
-        new_pp = delta_pp.view(ctx.input_shape)
-        new_np = delta_np.view(ctx.input_shape)
-        new_pn = delta_pn.view(ctx.input_shape)
-        new_nn = delta_nn.view(ctx.input_shape)
-
-        return make_grad_4(new_pp, new_np, new_pn, new_nn), None, None, None
+        return BackwardBuilder.run(ctx, grad_4, compute, num_extra_returns=4)
 
 
 def dc_forward_squeeze(m: Squeeze, x: Tensor) -> Tensor:
+    cache, layer_name = get_cache_info(m)
     return DCSqueezeFunction.apply(x, m.dim,
-                                    getattr(m, DC_IS_OUTPUT_LAYER, False))
+                                    getattr(m, DC_IS_OUTPUT_LAYER, False),
+                                    cache, layer_name)
 
 
-def patch_squeeze(module: Squeeze) -> None:
-    if hasattr(module, DC_ORIGINAL_FORWARD): return
-    setattr(module, DC_ORIGINAL_FORWARD, module.forward)
-    setattr(module, DC_ENABLED, True)
-    setattr(module, DC_IS_OUTPUT_LAYER, False)
-    
-
-    def patched(x):
-        if getattr(module, DC_ENABLED, False):
-            return dc_forward_squeeze(module, x)
-        else:
-            return getattr(module, DC_ORIGINAL_FORWARD)(x)
-
-    module.forward = patched
-
-
-def unpatch_squeeze(module: Squeeze) -> None:
-    if hasattr(module, DC_ORIGINAL_FORWARD):
-        module.forward = getattr(module, DC_ORIGINAL_FORWARD)
-        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER]:
-            if hasattr(module, a): delattr(module, a)
+patch_squeeze = create_patch_function(dc_forward_squeeze)
+unpatch_squeeze = create_unpatch_function()
 
 
 # =============================================================================
@@ -351,57 +263,38 @@ class DCUnsqueezeFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, input_4: Tensor, dim: int,
-                is_output_layer: bool) -> Tensor:
-        pos, neg = split_input_4(input_4)
+                is_output_layer: bool, cache, layer_name) -> Tensor:
+        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name)
+        pos, neg = fb.split_input(input_4)
 
         ctx.dim = dim
-        ctx.is_output_layer = is_output_layer
-        
 
         out_pos = pos.unsqueeze(dim)
         out_neg = neg.unsqueeze(dim)
 
-        return make_output_4(out_pos, out_neg)
+        return fb.build_output(out_pos, out_neg, recenter=False)
 
     @staticmethod
-    def backward(ctx, grad_4: Tensor) -> Tuple[Tensor, None, None, None]:
-        delta_pp, delta_np, delta_pn, delta_nn = init_backward(
-            grad_4, ctx.is_output_layer)
+    def backward(ctx, grad_4: Tensor) -> Tuple[Tensor, None, None, None, None]:
+        def compute(ctx, delta_pp, delta_np, delta_pn, delta_nn):
+            new_pp = delta_pp.squeeze(ctx.dim)
+            new_np = delta_np.squeeze(ctx.dim)
+            new_pn = delta_pn.squeeze(ctx.dim)
+            new_nn = delta_nn.squeeze(ctx.dim)
+            return new_pp, new_np, new_pn, new_nn
 
-        new_pp = delta_pp.squeeze(ctx.dim)
-        new_np = delta_np.squeeze(ctx.dim)
-        new_pn = delta_pn.squeeze(ctx.dim)
-        new_nn = delta_nn.squeeze(ctx.dim)
-
-        return make_grad_4(new_pp, new_np, new_pn, new_nn), None, None, None
+        return BackwardBuilder.run(ctx, grad_4, compute, num_extra_returns=4)
 
 
 def dc_forward_unsqueeze(m: Unsqueeze, x: Tensor) -> Tensor:
+    cache, layer_name = get_cache_info(m)
     return DCUnsqueezeFunction.apply(x, m.dim,
-                                      getattr(m, DC_IS_OUTPUT_LAYER, False))
+                                      getattr(m, DC_IS_OUTPUT_LAYER, False),
+                                      cache, layer_name)
 
 
-def patch_unsqueeze(module: Unsqueeze) -> None:
-    if hasattr(module, DC_ORIGINAL_FORWARD): return
-    setattr(module, DC_ORIGINAL_FORWARD, module.forward)
-    setattr(module, DC_ENABLED, True)
-    setattr(module, DC_IS_OUTPUT_LAYER, False)
-    
-
-    def patched(x):
-        if getattr(module, DC_ENABLED, False):
-            return dc_forward_unsqueeze(module, x)
-        else:
-            return getattr(module, DC_ORIGINAL_FORWARD)(x)
-
-    module.forward = patched
-
-
-def unpatch_unsqueeze(module: Unsqueeze) -> None:
-    if hasattr(module, DC_ORIGINAL_FORWARD):
-        module.forward = getattr(module, DC_ORIGINAL_FORWARD)
-        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER]:
-            if hasattr(module, a): delattr(module, a)
+patch_unsqueeze = create_patch_function(dc_forward_unsqueeze)
+unpatch_unsqueeze = create_unpatch_function()
 
 
 # =============================================================================
@@ -424,58 +317,39 @@ class DCTransposeFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, input_4: Tensor, dim0: int, dim1: int,
-                is_output_layer: bool) -> Tensor:
-        pos, neg = split_input_4(input_4)
+                is_output_layer: bool, cache, layer_name) -> Tensor:
+        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name)
+        pos, neg = fb.split_input(input_4)
 
         ctx.dim0, ctx.dim1 = dim0, dim1
-        ctx.is_output_layer = is_output_layer
-        
 
         out_pos = pos.transpose(dim0, dim1)
         out_neg = neg.transpose(dim0, dim1)
 
-        return make_output_4(out_pos, out_neg)
+        return fb.build_output(out_pos, out_neg, recenter=False)
 
     @staticmethod
-    def backward(ctx, grad_4: Tensor) -> Tuple[Tensor, None, None, None, None]:
-        delta_pp, delta_np, delta_pn, delta_nn = init_backward(
-            grad_4, ctx.is_output_layer)
+    def backward(ctx, grad_4: Tensor) -> Tuple[Tensor, None, None, None, None, None]:
+        def compute(ctx, delta_pp, delta_np, delta_pn, delta_nn):
+            # Transpose is its own inverse
+            new_pp = delta_pp.transpose(ctx.dim0, ctx.dim1)
+            new_np = delta_np.transpose(ctx.dim0, ctx.dim1)
+            new_pn = delta_pn.transpose(ctx.dim0, ctx.dim1)
+            new_nn = delta_nn.transpose(ctx.dim0, ctx.dim1)
+            return new_pp, new_np, new_pn, new_nn
 
-        # Transpose is its own inverse
-        new_pp = delta_pp.transpose(ctx.dim0, ctx.dim1)
-        new_np = delta_np.transpose(ctx.dim0, ctx.dim1)
-        new_pn = delta_pn.transpose(ctx.dim0, ctx.dim1)
-        new_nn = delta_nn.transpose(ctx.dim0, ctx.dim1)
-
-        return make_grad_4(new_pp, new_np, new_pn, new_nn), None, None, None, None
+        return BackwardBuilder.run(ctx, grad_4, compute, num_extra_returns=5)
 
 
 def dc_forward_transpose(m: Transpose, x: Tensor) -> Tensor:
+    cache, layer_name = get_cache_info(m)
     return DCTransposeFunction.apply(x, m.dim0, m.dim1,
-                                      getattr(m, DC_IS_OUTPUT_LAYER, False))
+                                      getattr(m, DC_IS_OUTPUT_LAYER, False),
+                                      cache, layer_name)
 
 
-def patch_transpose(module: Transpose) -> None:
-    if hasattr(module, DC_ORIGINAL_FORWARD): return
-    setattr(module, DC_ORIGINAL_FORWARD, module.forward)
-    setattr(module, DC_ENABLED, True)
-    setattr(module, DC_IS_OUTPUT_LAYER, False)
-    
-
-    def patched(x):
-        if getattr(module, DC_ENABLED, False):
-            return dc_forward_transpose(module, x)
-        else:
-            return getattr(module, DC_ORIGINAL_FORWARD)(x)
-
-    module.forward = patched
-
-
-def unpatch_transpose(module: Transpose) -> None:
-    if hasattr(module, DC_ORIGINAL_FORWARD):
-        module.forward = getattr(module, DC_ORIGINAL_FORWARD)
-        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER]:
-            if hasattr(module, a): delattr(module, a)
+patch_transpose = create_patch_function(dc_forward_transpose)
+unpatch_transpose = create_unpatch_function()
 
 
 # =============================================================================
@@ -497,62 +371,43 @@ class DCPermuteFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, input_4: Tensor, dims: Tuple[int, ...],
-                is_output_layer: bool) -> Tensor:
-        pos, neg = split_input_4(input_4)
+                is_output_layer: bool, cache, layer_name) -> Tensor:
+        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name)
+        pos, neg = fb.split_input(input_4)
 
         ctx.dims = dims
-        ctx.is_output_layer = is_output_layer
-        
 
         out_pos = pos.permute(dims)
         out_neg = neg.permute(dims)
 
-        return make_output_4(out_pos, out_neg)
+        return fb.build_output(out_pos, out_neg, recenter=False)
 
     @staticmethod
-    def backward(ctx, grad_4: Tensor) -> Tuple[Tensor, None, None, None]:
-        delta_pp, delta_np, delta_pn, delta_nn = init_backward(
-            grad_4, ctx.is_output_layer)
+    def backward(ctx, grad_4: Tensor) -> Tuple[Tensor, None, None, None, None]:
+        def compute(ctx, delta_pp, delta_np, delta_pn, delta_nn):
+            # Compute inverse permutation
+            inv_dims = [0] * len(ctx.dims)
+            for i, d in enumerate(ctx.dims):
+                inv_dims[d] = i
 
-        # Compute inverse permutation
-        inv_dims = [0] * len(ctx.dims)
-        for i, d in enumerate(ctx.dims):
-            inv_dims[d] = i
+            new_pp = delta_pp.permute(inv_dims)
+            new_np = delta_np.permute(inv_dims)
+            new_pn = delta_pn.permute(inv_dims)
+            new_nn = delta_nn.permute(inv_dims)
+            return new_pp, new_np, new_pn, new_nn
 
-        new_pp = delta_pp.permute(inv_dims)
-        new_np = delta_np.permute(inv_dims)
-        new_pn = delta_pn.permute(inv_dims)
-        new_nn = delta_nn.permute(inv_dims)
-
-        return make_grad_4(new_pp, new_np, new_pn, new_nn), None, None, None
+        return BackwardBuilder.run(ctx, grad_4, compute, num_extra_returns=4)
 
 
 def dc_forward_permute(m: Permute, x: Tensor) -> Tensor:
+    cache, layer_name = get_cache_info(m)
     return DCPermuteFunction.apply(x, m.dims,
-                                    getattr(m, DC_IS_OUTPUT_LAYER, False))
+                                    getattr(m, DC_IS_OUTPUT_LAYER, False),
+                                    cache, layer_name)
 
 
-def patch_permute(module: Permute) -> None:
-    if hasattr(module, DC_ORIGINAL_FORWARD): return
-    setattr(module, DC_ORIGINAL_FORWARD, module.forward)
-    setattr(module, DC_ENABLED, True)
-    setattr(module, DC_IS_OUTPUT_LAYER, False)
-    
-
-    def patched(x):
-        if getattr(module, DC_ENABLED, False):
-            return dc_forward_permute(module, x)
-        else:
-            return getattr(module, DC_ORIGINAL_FORWARD)(x)
-
-    module.forward = patched
-
-
-def unpatch_permute(module: Permute) -> None:
-    if hasattr(module, DC_ORIGINAL_FORWARD):
-        module.forward = getattr(module, DC_ORIGINAL_FORWARD)
-        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER]:
-            if hasattr(module, a): delattr(module, a)
+patch_permute = create_patch_function(dc_forward_permute)
+unpatch_permute = create_unpatch_function()
 
 
 # =============================================================================
@@ -562,41 +417,23 @@ def unpatch_permute(module: Permute) -> None:
 class DCDropoutFunction(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, input_4: Tensor, is_output_layer: bool) -> Tensor:
+    def forward(ctx, input_4: Tensor, is_output_layer: bool, cache, layer_name) -> Tensor:
         # In DC mode, dropout is identity (should only be used in eval mode)
-        ctx.is_output_layer = is_output_layer
-        
+        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name)
         return input_4
 
     @staticmethod
-    def backward(ctx, grad_4: Tensor) -> Tuple[Tensor, None, None]:
+    def backward(ctx, grad_4: Tensor) -> Tuple[Tensor, None, None, None]:
         # Identity backward
-        return grad_4, None, None
+        return grad_4, None, None, None
 
 
 def dc_forward_dropout(m: nn.Dropout, x: Tensor) -> Tensor:
+    cache, layer_name = get_cache_info(m)
     return DCDropoutFunction.apply(x,
-                                    getattr(m, DC_IS_OUTPUT_LAYER, False))
+                                    getattr(m, DC_IS_OUTPUT_LAYER, False),
+                                    cache, layer_name)
 
 
-def patch_dropout(module: nn.Dropout) -> None:
-    if hasattr(module, DC_ORIGINAL_FORWARD): return
-    setattr(module, DC_ORIGINAL_FORWARD, module.forward)
-    setattr(module, DC_ENABLED, True)
-    setattr(module, DC_IS_OUTPUT_LAYER, False)
-    
-
-    def patched(x):
-        if getattr(module, DC_ENABLED, False):
-            return dc_forward_dropout(module, x)
-        else:
-            return getattr(module, DC_ORIGINAL_FORWARD)(x)
-
-    module.forward = patched
-
-
-def unpatch_dropout(module: nn.Dropout) -> None:
-    if hasattr(module, DC_ORIGINAL_FORWARD):
-        module.forward = getattr(module, DC_ORIGINAL_FORWARD)
-        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER]:
-            if hasattr(module, a): delattr(module, a)
+patch_dropout = create_patch_function(dc_forward_dropout)
+unpatch_dropout = create_unpatch_function()

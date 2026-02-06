@@ -5,10 +5,10 @@ import torch.nn as nn
 from torch import Tensor
 from typing import Tuple, Type
 
-from .base import (
-    split_input_4, make_output_4, make_grad_4,
-    init_backward, recenter_dc,
-    DC_ENABLED, DC_ORIGINAL_FORWARD, DC_RELU_MODE, DC_IS_OUTPUT_LAYER
+from .base import DC_ENABLED, DC_ORIGINAL_FORWARD, DC_RELU_MODE, DC_IS_OUTPUT_LAYER
+from .patch_builder import (
+    ForwardBuilder, BackwardBuilder, get_cache_info,
+    create_unpatch_function,
 )
 
 DC_BACKPROP_MODE = '_dc_backprop_mode'
@@ -38,17 +38,7 @@ def _forward_neg_min(pos: Tensor, neg: Tensor) -> Tensor:
 
 
 def forward_relu(pos: Tensor, neg: Tensor, split_mode: str) -> Tuple[Tensor, Tensor]:
-    """
-    DC forward for ReLU with mode dispatch.
-
-    Args:
-        pos: Positive component (a)
-        neg: Negative component (b)
-        split_mode: 'max', 'min', or 'half'
-
-    Returns:
-        (out_pos, out_neg) tuple
-    """
+    """DC forward for ReLU with mode dispatch."""
     if split_mode == 'max':
         return _forward_pos_max(pos, neg), _forward_neg_max(pos, neg)
     elif split_mode == 'min':
@@ -65,19 +55,7 @@ def backward_relu(
     delta_pp: Tensor, delta_np: Tensor, delta_pn: Tensor, delta_nn: Tensor,
     mp: Tensor, mn: Tensor, split_mode: str, backprop_mode: str
 ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
-    """
-    DC backward for ReLU with mode dispatch.
-
-    Args:
-        delta_pp, delta_np, delta_pn, delta_nn: Incoming gradients
-        mp: Mask where z >= 0 (pos >= neg)
-        mn: Mask where z < 0 (pos < neg)
-        split_mode: 'max', 'min', or 'half'
-        backprop_mode: 'standard', 'mask_diff', or 'sum'
-
-    Returns:
-        (new_pp, new_np, new_pn, new_nn) tuple
-    """
+    """DC backward for ReLU with mode dispatch."""
     if split_mode == 'max':
         return _backprop_max(delta_pp, delta_np, delta_pn, delta_nn, mp, mn, backprop_mode)
     elif split_mode == 'min':
@@ -99,42 +77,49 @@ def _make_relu_function(split_mode: str, backprop_mode: str) -> Type[torch.autog
         """ReLU DC function with split_mode and backprop_mode captured from closure."""
 
         @staticmethod
-        def forward(ctx, input_4: Tensor, is_output_layer: bool) -> Tensor:
-            pos, neg = split_input_4(input_4)
+        def forward(ctx, input_4: Tensor, is_output_layer: bool, cache, layer_name) -> Tensor:
+            fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name)
+            pos, neg = fb.split_input(input_4)
             z = pos - neg
 
             out_pos, out_neg = forward_relu(pos, neg, split_mode)
 
-            ctx.save_for_backward(z)
-            ctx.is_output_layer = is_output_layer
+            # Check for cached mask in backward-only mode
+            use_cached_mask = False
+            if fb.should_use_cached_mask():
+                cached_mask = fb.get_cached_relu_mask()
+                if cached_mask is not None:
+                    use_cached_mask = True
+                    ctx.save_for_backward(cached_mask)
 
-            output = make_output_4(out_pos, out_neg)
-            return recenter_dc(output)
+            if not use_cached_mask:
+                ctx.save_for_backward(z)
+
+            ctx.use_cached_mask = use_cached_mask
+            return fb.build_output_dc(out_pos, out_neg)
 
         @staticmethod
-        def backward(ctx, grad_4: Tensor) -> Tuple[Tensor, None]:
-            z, = ctx.saved_tensors
-            mp, mn = (z >= 0).float(), (z < 0).float()
+        def backward(ctx, grad_4: Tensor) -> Tuple[Tensor, None, None, None]:
+            def compute(ctx, delta_pp, delta_np, delta_pn, delta_nn):
+                saved_tensor, = ctx.saved_tensors
 
-            delta_pp, delta_np, delta_pn, delta_nn = init_backward(
-                grad_4, ctx.is_output_layer)
+                if ctx.use_cached_mask:
+                    mp = saved_tensor.float()
+                    mn = (~saved_tensor).float()
+                else:
+                    z = saved_tensor
+                    mp, mn = (z >= 0).float(), (z < 0).float()
 
-            new_pp, new_np, new_pn, new_nn = backward_relu(
-                delta_pp, delta_np, delta_pn, delta_nn, mp, mn, split_mode, backprop_mode)
+                return backward_relu(
+                    delta_pp, delta_np, delta_pn, delta_nn, mp, mn, split_mode, backprop_mode)
 
-            return make_grad_4(new_pp, new_np, new_pn, new_nn), None
+            return BackwardBuilder.run(ctx, grad_4, compute, num_extra_returns=3)
 
     return DCReLUFunction
 
 
 def _backprop_max(delta_pp, delta_np, delta_pn, delta_nn, mp, mn, backprop_mode):
-    """Max mode backward: forward_pos = max{a, b}, forward_neg = b
-
-    Gradient reconstruction: grad = pp - np - pn + nn
-    ReLU gradient: grad_out = grad_in * (z >= 0) = grad_in * mp
-
-    Reference formulas from direct_relu_split.py
-    """
+    """Max mode backward: forward_pos = max{a, b}, forward_neg = b"""
     if backprop_mode == 'standard':
         new_pp = delta_pp * mp
         new_np = delta_np + delta_pp * mn
@@ -156,13 +141,7 @@ def _backprop_max(delta_pp, delta_np, delta_pn, delta_nn, mp, mn, backprop_mode)
 
 
 def _backprop_min(delta_pp, delta_np, delta_pn, delta_nn, mp, mn, backprop_mode):
-    """Min mode backward: forward_pos = a, forward_neg = min{a, b}
-
-    Gradient reconstruction: grad = pp - np - pn + nn
-    ReLU gradient: grad_out = grad_in * (z >= 0) = grad_in * mp
-
-    Reference formulas from direct_relu_split.py
-    """
+    """Min mode backward: forward_pos = a, forward_neg = min{a, b}"""
     if backprop_mode == 'standard':
         new_pp = delta_pp + delta_np * mn
         new_np = delta_np * mp
@@ -185,14 +164,13 @@ def _backprop_min(delta_pp, delta_np, delta_pn, delta_nn, mp, mn, backprop_mode)
 
 def dc_forward_relu(m: nn.ReLU, x: Tensor) -> Tensor:
     func = getattr(m, DC_RELU_FUNCTION)
-    return func.apply(
-        x,
-        getattr(m, DC_IS_OUTPUT_LAYER, False)
-    )
+    cache, layer_name = get_cache_info(m)
+    return func.apply(x, getattr(m, DC_IS_OUTPUT_LAYER, False), cache, layer_name)
 
 
 def patch_relu(m: nn.ReLU, split_mode: str = 'max', backprop_mode: str = 'standard') -> None:
-    if hasattr(m, DC_ORIGINAL_FORWARD): return
+    if hasattr(m, DC_ORIGINAL_FORWARD):
+        return
     setattr(m, DC_ORIGINAL_FORWARD, m.forward)
     setattr(m, DC_ENABLED, True)
     setattr(m, DC_RELU_MODE, split_mode)
@@ -209,11 +187,7 @@ def patch_relu(m: nn.ReLU, split_mode: str = 'max', backprop_mode: str = 'standa
     m.forward = patched
 
 
-def unpatch_relu(m: nn.ReLU) -> None:
-    if hasattr(m, DC_ORIGINAL_FORWARD):
-        m.forward = getattr(m, DC_ORIGINAL_FORWARD)
-        for a in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_RELU_MODE, DC_BACKPROP_MODE, DC_RELU_FUNCTION, DC_IS_OUTPUT_LAYER]:
-            if hasattr(m, a): delattr(m, a)
+unpatch_relu = create_unpatch_function(extra_attrs=(DC_RELU_MODE, DC_BACKPROP_MODE, DC_RELU_FUNCTION))
 
 
 # Default DCReLUFunction for backward compatibility

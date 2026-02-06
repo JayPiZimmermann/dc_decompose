@@ -34,6 +34,8 @@ DC_ENABLED = '_dc_enabled'
 DC_ORIGINAL_FORWARD = '_dc_original_forward'
 DC_RELU_MODE = '_dc_relu_mode'
 DC_IS_OUTPUT_LAYER = '_dc_is_output_layer'
+DC_ALIGNMENT_CACHE = '_dc_alignment_cache'
+DC_CACHE_LAYER_NAME = '_dc_cache_name'
 
 
 # =============================================================================
@@ -134,22 +136,28 @@ def init_backward(grad_4: Tensor, is_output_layer: bool) -> Tuple[Tensor, Tensor
 
 def recenter_grad(grad_4: Tensor) -> Tensor:
     """
-    Re-center gradient for numerical stability (detached from autograd).
+    Re-center gradient for numerical stability.
 
     Converts [delta_pp; delta_np; delta_pn; delta_nn] to canonical form
-    where magnitudes are minimized while preserving gradient reconstruction.
+    where magnitudes are minimized while preserving gradient reconstruction:
+        grad = delta_pp - delta_np - delta_pn + delta_nn
+
+    After re-centering:
+        new_pp = relu(grad), new_np = 0, new_pn = 0, new_nn = relu(-grad)
+
+    This reduces 4 potentially large values to 2 smaller values.
     """
     delta_pp, delta_np, delta_pn, delta_nn = split_grad_4(grad_4)
 
-    # Reconstruct the actual gradients
-    grad_pos = delta_pp - delta_np  # gradient w.r.t. pos
-    grad_neg = delta_pn - delta_nn  # gradient w.r.t. neg
+    # Reconstruct the actual gradient
+    grad = delta_pp - delta_np - delta_pn + delta_nn
 
-    # Re-center: put positive parts in pp/pn, negative parts in np/nn
-    new_pp = torch.relu(grad_pos)
-    new_np = torch.relu(-grad_pos)
-    new_pn = torch.relu(grad_neg)
-    new_nn = torch.relu(-grad_neg)
+    # Re-center: minimize magnitudes while preserving reconstruction
+    # grad = relu(grad) - 0 - 0 - relu(-grad) = relu(grad) - relu(-grad) = grad ✓
+    new_pp = torch.relu(grad)
+    new_np = torch.zeros_like(grad)
+    new_pn = torch.zeros_like(grad)
+    new_nn = torch.relu(-grad)
 
     return make_grad_4(new_pp, new_np, new_pn, new_nn)
 

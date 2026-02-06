@@ -12,10 +12,8 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
-from .base import (
-    recenter_dc,
-    DC_ENABLED, DC_ORIGINAL_FORWARD, DC_IS_OUTPUT_LAYER
-)
+from .base import recenter_dc
+from .patch_builder import create_patch_function, create_unpatch_function
 
 
 class Add(nn.Module):
@@ -51,32 +49,8 @@ def dc_forward_add(module: Add, x: Tensor, y: Tensor) -> Tensor:
     return result
 
 
-def patch_add(module: Add) -> None:
-    """Patch Add module for DC decomposition."""
-    if hasattr(module, DC_ORIGINAL_FORWARD):
-        return
-    setattr(module, DC_ORIGINAL_FORWARD, module.forward)
-    setattr(module, DC_ENABLED, True)
-    setattr(module, DC_IS_OUTPUT_LAYER, False)
-    
-
-    def patched(x, y):
-        if getattr(module, DC_ENABLED, False):
-            return dc_forward_add(module, x, y)
-        else:
-            return getattr(module, DC_ORIGINAL_FORWARD)(x, y)
-
-    module.forward = patched
-
-
-def unpatch_add(module: Add) -> None:
-    """Unpatch Add module, restoring original forward."""
-    if hasattr(module, DC_ORIGINAL_FORWARD):
-        module.forward = getattr(module, DC_ORIGINAL_FORWARD)
-        for attr in [DC_ORIGINAL_FORWARD, DC_ENABLED]:
-            if hasattr(module, attr):
-                delattr(module, attr)
-
+patch_add = create_patch_function(dc_forward_add)
+unpatch_add = create_unpatch_function()
 
 # Legacy aliases for backward compatibility
 DCAdd = Add

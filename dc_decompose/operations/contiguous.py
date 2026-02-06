@@ -1,29 +1,25 @@
 """
 DC Decomposition for tensor.contiguous() operation. Forward/Backward: [4*batch] -> [4*batch]
 
-Contiguous operation is a memory layout operation that doesn't change values - 
-pos and neg streams are made contiguous independently.
+Contiguous operation is a memory layout operation that doesn't change values.
 """
 
 import torch
 import torch.nn as nn
 from torch import Tensor
-from typing import Tuple
 
-from .base import (
-    split_input_4, make_output_4, make_grad_4,
-    init_backward, recenter_forward,
-    DC_ENABLED, DC_ORIGINAL_FORWARD, DC_IS_OUTPUT_LAYER
+from .base import DC_IS_OUTPUT_LAYER
+from .patch_builder import (
+    ForwardBuilder, BackwardBuilder, get_cache_info,
+    create_patch_function, create_unpatch_function,
 )
 
 
 class Contiguous(nn.Module):
     """
     Module wrapper for tensor.contiguous() that can be patched for DC decomposition.
-    
-    This is used by functional_replacer to replace .contiguous() calls.
     """
-    
+
     def __init__(self):
         super().__init__()
 
@@ -32,62 +28,33 @@ class Contiguous(nn.Module):
 
 
 class DCContiguousFunction(torch.autograd.Function):
-    
+
     @staticmethod
-    def forward(ctx, input_4: Tensor, is_output_layer: bool) -> Tensor:
-        pos, neg = split_input_4(input_4)
-        
-        # Make both streams contiguous
+    def forward(ctx, input_4: Tensor, is_output_layer: bool, cache, layer_name) -> Tensor:
+        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name)
+        pos, neg = fb.split_input(input_4)
+
         out_pos = pos.contiguous()
         out_neg = neg.contiguous()
-        
-        ctx.is_output_layer = is_output_layer
-        
-        
-        output = make_output_4(out_pos, out_neg)
-        return recenter_forward(output)
-    
+
+        return fb.build_output(out_pos, out_neg)
+
     @staticmethod
-    def backward(ctx, grad_4: Tensor) -> Tuple[Tensor, None, None]:
-        delta_pp, delta_np, delta_pn, delta_nn = init_backward(
-            grad_4, ctx.is_output_layer)
-        
-        # Contiguous is a no-op for gradients - just pass them through
-        grad_input = make_grad_4(delta_pp, delta_np, delta_pn, delta_nn)
-        return grad_input, None, None
+    def backward(ctx, grad_4: Tensor):
+        def compute(_ctx, delta_pp, delta_np, delta_pn, delta_nn):
+            return delta_pp, delta_np, delta_pn, delta_nn
+
+        return BackwardBuilder.run(ctx, grad_4, compute, num_extra_returns=3)
 
 
 def dc_forward_contiguous(module: Contiguous, input: Tensor) -> Tensor:
-    """DC forward for contiguous operation."""
+    cache, layer_name = get_cache_info(module)
     return DCContiguousFunction.apply(
         input,
         getattr(module, DC_IS_OUTPUT_LAYER, False),
-        0.5
+        cache, layer_name,
     )
 
 
-def patch_contiguous(module: Contiguous) -> None:
-    """Patch Contiguous module for DC decomposition."""
-    if hasattr(module, DC_ORIGINAL_FORWARD):
-        return
-    setattr(module, DC_ORIGINAL_FORWARD, module.forward)
-    setattr(module, DC_ENABLED, True)
-    setattr(module, DC_IS_OUTPUT_LAYER, False)
-    
-
-    def patched(input):
-        if getattr(module, DC_ENABLED, False):
-            return dc_forward_contiguous(module, input)
-        else:
-            return getattr(module, DC_ORIGINAL_FORWARD)(input)
-
-    module.forward = patched
-
-
-def unpatch_contiguous(module: Contiguous) -> None:
-    """Unpatch Contiguous module."""
-    if hasattr(module, DC_ORIGINAL_FORWARD):
-        module.forward = getattr(module, DC_ORIGINAL_FORWARD)
-        for attr in [DC_ORIGINAL_FORWARD, DC_ENABLED, DC_IS_OUTPUT_LAYER]:
-            if hasattr(module, attr):
-                delattr(module, attr)
+patch_contiguous = create_patch_function(dc_forward_contiguous)
+unpatch_contiguous = create_unpatch_function()
