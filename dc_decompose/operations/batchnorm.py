@@ -19,8 +19,8 @@ class DCBatchNormFunction(torch.autograd.Function):
     def forward(ctx, input_4: Tensor, weight: Tensor, bias: Tensor,
                 running_mean: Tensor, running_var: Tensor, eps: float,
                 momentum: float, is_training: bool, is_2d: bool,
-                is_output_layer: bool, cache, layer_name) -> Tensor:
-        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name)
+                is_output_layer: bool, cache, layer_name, alpha: float) -> Tensor:
+        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name, alpha)
         pos, neg = fb.split_input(input_4)
 
         with torch.no_grad():
@@ -111,19 +111,19 @@ class DCBatchNormFunction(torch.autograd.Function):
 
             return new_pp, new_np, new_pn, new_nn
 
-        return BackwardBuilder.run(ctx, grad_4, compute, num_extra_returns=11)
+        return BackwardBuilder.run(ctx, grad_4, compute, num_extra_returns=12)
 
 
 def dc_forward_batchnorm(module: Union[nn.BatchNorm1d, nn.BatchNorm2d], x: Tensor) -> Tensor:
     is_2d = isinstance(module, nn.BatchNorm2d)
-    cache, layer_name = get_cache_info(module)
+    cache, layer_name, alpha = get_cache_info(module)
 
     return DCBatchNormFunction.apply(
         x, module.weight, module.bias,
         module.running_mean, module.running_var, module.eps, module.momentum,
         module.training, is_2d,
         getattr(module, DC_IS_OUTPUT_LAYER, False),
-        cache, layer_name,
+        cache, layer_name, alpha,
     )
 
 

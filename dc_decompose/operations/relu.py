@@ -77,8 +77,8 @@ def _make_relu_function(split_mode: str, backprop_mode: str) -> Type[torch.autog
         """ReLU DC function with split_mode and backprop_mode captured from closure."""
 
         @staticmethod
-        def forward(ctx, input_4: Tensor, is_output_layer: bool, cache, layer_name) -> Tensor:
-            fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name)
+        def forward(ctx, input_4: Tensor, is_output_layer: bool, cache, layer_name, alpha: float) -> Tensor:
+            fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name, alpha)
             pos, neg = fb.split_input(input_4)
             z = pos - neg
 
@@ -99,7 +99,7 @@ def _make_relu_function(split_mode: str, backprop_mode: str) -> Type[torch.autog
             return fb.build_output_dc(out_pos, out_neg)
 
         @staticmethod
-        def backward(ctx, grad_4: Tensor) -> Tuple[Tensor, None, None, None]:
+        def backward(ctx, grad_4: Tensor) -> Tuple[Tensor, None, None, None, None]:
             def compute(ctx, delta_pp, delta_np, delta_pn, delta_nn):
                 saved_tensor, = ctx.saved_tensors
 
@@ -113,7 +113,7 @@ def _make_relu_function(split_mode: str, backprop_mode: str) -> Type[torch.autog
                 return backward_relu(
                     delta_pp, delta_np, delta_pn, delta_nn, mp, mn, split_mode, backprop_mode)
 
-            return BackwardBuilder.run(ctx, grad_4, compute, num_extra_returns=3)
+            return BackwardBuilder.run(ctx, grad_4, compute, num_extra_returns=4)
 
     return DCReLUFunction
 
@@ -164,8 +164,8 @@ def _backprop_min(delta_pp, delta_np, delta_pn, delta_nn, mp, mn, backprop_mode)
 
 def dc_forward_relu(m: nn.ReLU, x: Tensor) -> Tensor:
     func = getattr(m, DC_RELU_FUNCTION)
-    cache, layer_name = get_cache_info(m)
-    return func.apply(x, getattr(m, DC_IS_OUTPUT_LAYER, False), cache, layer_name)
+    cache, layer_name, alpha = get_cache_info(m)
+    return func.apply(x, getattr(m, DC_IS_OUTPUT_LAYER, False), cache, layer_name, alpha)
 
 
 def patch_relu(m: nn.ReLU, split_mode: str = 'max', backprop_mode: str = 'standard') -> None:

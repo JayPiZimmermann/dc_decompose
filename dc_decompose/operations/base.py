@@ -93,6 +93,77 @@ def make_grad_4(delta_pp: Tensor, delta_np: Tensor,
     return cat4(delta_pp, delta_np, delta_pn, delta_nn)
 
 
+# Module attribute for sensitivity shift alpha
+DC_SENSITIVITY_ALPHA = '_dc_sensitivity_alpha'
+
+
+def shift_sensitivities(
+    delta_pp: Tensor,
+    delta_np: Tensor,
+    delta_pn: Tensor,
+    delta_nn: Tensor,
+    alpha: float,
+) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+    """
+    Apply adaptive shift to sensitivities to reduce magnitudes.
+
+    The shift preserves the gradient reconstruction:
+        grad = delta_pp - delta_np - delta_pn + delta_nn
+
+    The formula shifts pos-path and neg-path sensitivities independently:
+        shift_p = alpha * (delta_pp + delta_np)
+        shift_n = alpha * (delta_pn + delta_nn)
+        new_pp = delta_pp - shift_p
+        new_np = delta_np - shift_p
+        new_pn = delta_pn - shift_n
+        new_nn = delta_nn - shift_n
+
+    This preserves the reconstruction because:
+        new_pp - new_np = delta_pp - delta_np (shift_p cancels)
+        new_pn - new_nn = delta_pn - delta_nn (shift_n cancels)
+
+    Args:
+        delta_pp, delta_np, delta_pn, delta_nn: 4 sensitivity tensors
+        alpha: Shift factor (0 = no shift, 0.5 = typical for add layers)
+
+    Returns:
+        (new_pp, new_np, new_pn, new_nn) shifted sensitivities
+    """
+    if alpha == 0.0:
+        return delta_pp, delta_np, delta_pn, delta_nn
+
+    shift_p = alpha * (delta_pp + delta_np)
+    shift_n = alpha * (delta_pn + delta_nn)
+
+    new_pp = delta_pp - shift_p
+    new_np = delta_np - shift_p
+    new_pn = delta_pn - shift_n
+    new_nn = delta_nn - shift_n
+
+    return new_pp, new_np, new_pn, new_nn
+
+
+def compute_frobenius_alpha(weight: Tensor) -> float:
+    """
+    Compute alpha based on Frobenius norm of weight matrix.
+
+    Formula: alpha = (1 - 1/rho) / 2 where rho is the Frobenius norm.
+
+    For rho > 1, this gives alpha in (0, 0.5).
+    For rho <= 1, this returns 0 (no shift needed).
+
+    Args:
+        weight: Weight tensor to compute Frobenius norm from
+
+    Returns:
+        Alpha value for shift_sensitivities
+    """
+    rho = torch.norm(weight, p='fro').item()
+    if rho > 1.0:
+        return (1.0 - 1.0 / rho) / 2.0
+    return 0.0
+
+
 def init_backward(grad_4: Tensor, is_output_layer: bool) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
     """
     Initialize 4-sensitivities for backward pass.

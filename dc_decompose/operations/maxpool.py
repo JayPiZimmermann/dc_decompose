@@ -24,8 +24,8 @@ class DCMaxPool2dFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input_4: Tensor, kernel_size, stride, padding,
                 is_output_layer: bool, cache: Optional['AlignmentCache'],
-                layer_name: Optional[str]) -> Tensor:
-        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name)
+                layer_name: Optional[str], alpha: float) -> Tensor:
+        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name, alpha)
         pos, neg = fb.split_input(input_4)
 
         # Check for cached indices in backward-only mode
@@ -75,7 +75,7 @@ class DCMaxPool2dFunction(torch.autograd.Function):
 
             return new_pp, new_np, new_pn, new_nn
 
-        return BackwardBuilder.run(ctx, grad_4, compute, num_extra_returns=6)
+        return BackwardBuilder.run(ctx, grad_4, compute, num_extra_returns=7)
 
 
 class DCMaxPool1dFunction(torch.autograd.Function):
@@ -83,8 +83,8 @@ class DCMaxPool1dFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input_4: Tensor, kernel_size, stride, padding,
                 is_output_layer: bool, cache: Optional['AlignmentCache'],
-                layer_name: Optional[str]) -> Tensor:
-        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name)
+                layer_name: Optional[str], alpha: float) -> Tensor:
+        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name, alpha)
         pos, neg = fb.split_input(input_4)
 
         # Check for cached indices in backward-only mode
@@ -134,28 +134,28 @@ class DCMaxPool1dFunction(torch.autograd.Function):
 
             return new_pp, new_np, new_pn, new_nn
 
-        return BackwardBuilder.run(ctx, grad_4, compute, num_extra_returns=6)
+        return BackwardBuilder.run(ctx, grad_4, compute, num_extra_returns=7)
 
 
 def dc_forward_maxpool2d(module: nn.MaxPool2d, x: Tensor) -> Tensor:
     kernel_size = module.kernel_size if isinstance(module.kernel_size, tuple) else (module.kernel_size, module.kernel_size)
     stride = module.stride if isinstance(module.stride, tuple) else (module.stride, module.stride)
     padding = module.padding if isinstance(module.padding, tuple) else (module.padding, module.padding)
-    cache, layer_name = get_cache_info(module)
+    cache, layer_name, alpha = get_cache_info(module)
     return DCMaxPool2dFunction.apply(
         x, kernel_size, stride, padding,
         getattr(module, DC_IS_OUTPUT_LAYER, False),
-        cache, layer_name,
+        cache, layer_name, alpha,
     )
 
 
 def dc_forward_maxpool1d(module: nn.MaxPool1d, x: Tensor) -> Tensor:
     stride = module.stride if module.stride is not None else module.kernel_size
-    cache, layer_name = get_cache_info(module)
+    cache, layer_name, alpha = get_cache_info(module)
     return DCMaxPool1dFunction.apply(
         x, module.kernel_size, stride, module.padding,
         getattr(module, DC_IS_OUTPUT_LAYER, False),
-        cache, layer_name,
+        cache, layer_name, alpha,
     )
 
 

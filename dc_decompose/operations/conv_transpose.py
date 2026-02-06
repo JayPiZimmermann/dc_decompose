@@ -18,8 +18,8 @@ class DCConvTranspose2dFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input_4: Tensor, weight: Tensor, bias: Optional[Tensor],
                 stride, padding, output_padding, dilation, groups,
-                is_output_layer: bool, cache, layer_name) -> Tensor:
-        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name)
+                is_output_layer: bool, cache, layer_name, alpha: float) -> Tensor:
+        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name, alpha)
         pos, neg = fb.split_input(input_4)
 
         weight_pos = F.relu(weight)
@@ -56,7 +56,7 @@ class DCConvTranspose2dFunction(torch.autograd.Function):
 
             return new_pp, new_np, new_pn, new_nn
 
-        return BackwardBuilder.run(ctx, grad_4, compute, num_extra_returns=10)
+        return BackwardBuilder.run(ctx, grad_4, compute, num_extra_returns=11)
 
 
 class DCConvTranspose1dFunction(torch.autograd.Function):
@@ -64,8 +64,8 @@ class DCConvTranspose1dFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input_4: Tensor, weight: Tensor, bias: Optional[Tensor],
                 stride, padding, output_padding, dilation, groups,
-                is_output_layer: bool, cache, layer_name) -> Tensor:
-        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name)
+                is_output_layer: bool, cache, layer_name, alpha: float) -> Tensor:
+        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name, alpha)
         pos, neg = fb.split_input(input_4)
 
         weight_pos = F.relu(weight)
@@ -101,7 +101,7 @@ class DCConvTranspose1dFunction(torch.autograd.Function):
 
             return new_pp, new_np, new_pn, new_nn
 
-        return BackwardBuilder.run(ctx, grad_4, compute, num_extra_returns=10)
+        return BackwardBuilder.run(ctx, grad_4, compute, num_extra_returns=11)
 
 
 def dc_forward_conv_transpose2d(m: nn.ConvTranspose2d, x: Tensor) -> Tensor:
@@ -109,20 +109,20 @@ def dc_forward_conv_transpose2d(m: nn.ConvTranspose2d, x: Tensor) -> Tensor:
     padding = m.padding if isinstance(m.padding, tuple) else (m.padding, m.padding)
     output_padding = m.output_padding if isinstance(m.output_padding, tuple) else (m.output_padding, m.output_padding)
     dilation = m.dilation if isinstance(m.dilation, tuple) else (m.dilation, m.dilation)
-    cache, layer_name = get_cache_info(m)
+    cache, layer_name, alpha = get_cache_info(m)
     return DCConvTranspose2dFunction.apply(
         x, m.weight, m.bias, stride, padding, output_padding, dilation, m.groups,
         getattr(m, DC_IS_OUTPUT_LAYER, False),
-        cache, layer_name,
+        cache, layer_name, alpha,
     )
 
 
 def dc_forward_conv_transpose1d(m: nn.ConvTranspose1d, x: Tensor) -> Tensor:
-    cache, layer_name = get_cache_info(m)
+    cache, layer_name, alpha = get_cache_info(m)
     return DCConvTranspose1dFunction.apply(
         x, m.weight, m.bias, m.stride[0], m.padding[0], m.output_padding[0], m.dilation[0], m.groups,
         getattr(m, DC_IS_OUTPUT_LAYER, False),
-        cache, layer_name,
+        cache, layer_name, alpha,
     )
 
 

@@ -14,7 +14,7 @@ Usage:
     class DCLinearFunction(torch.autograd.Function):
         @staticmethod
         def forward(ctx, input_4, weight, bias, is_output_layer, cache, layer_name):
-            fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name)
+            fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name, alpha)
             pos, neg = fb.split_input(input_4)
 
             # ... layer-specific computation ...
@@ -39,19 +39,21 @@ import torch.nn as nn
 from .base import (
     split_input_4, make_output_4, make_grad_4,
     init_backward, recenter_forward, recenter_dc, recenter_grad,
+    shift_sensitivities,
     DC_ENABLED, DC_ORIGINAL_FORWARD, DC_IS_OUTPUT_LAYER,
-    DC_ALIGNMENT_CACHE, DC_CACHE_LAYER_NAME,
+    DC_ALIGNMENT_CACHE, DC_CACHE_LAYER_NAME, DC_SENSITIVITY_ALPHA,
 )
 
 if TYPE_CHECKING:
     from ..alignment_cache import AlignmentCache
 
 
-def get_cache_info(module: nn.Module) -> Tuple[Optional['AlignmentCache'], Optional[str]]:
-    """Extract alignment cache and layer name from a module."""
+def get_cache_info(module: nn.Module) -> Tuple[Optional['AlignmentCache'], Optional[str], float]:
+    """Extract alignment cache, layer name, and sensitivity alpha from a module."""
     cache = getattr(module, DC_ALIGNMENT_CACHE, None)
     layer_name = getattr(module, DC_CACHE_LAYER_NAME, None)
-    return cache, layer_name
+    alpha = getattr(module, DC_SENSITIVITY_ALPHA, 0.0)
+    return cache, layer_name, alpha
 
 
 class ForwardBuilder:
@@ -62,7 +64,7 @@ class ForwardBuilder:
     Usage:
         @staticmethod
         def forward(ctx, input_4, ..., is_output_layer, cache, layer_name):
-            fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name)
+            fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name, alpha)
             pos, neg = fb.split_input(input_4)
 
             # ... layer-specific computation ...
@@ -76,16 +78,19 @@ class ForwardBuilder:
         is_output_layer: bool,
         cache: Optional['AlignmentCache'] = None,
         layer_name: Optional[str] = None,
+        alpha: float = 0.0,
     ):
         self.ctx = ctx
         self.is_output_layer = is_output_layer
         self.cache = cache
         self.layer_name = layer_name
+        self.alpha = alpha
 
         # Store in context for backward
         ctx.is_output_layer = is_output_layer
         ctx._dc_cache = cache
         ctx._dc_layer_name = layer_name
+        ctx._dc_sensitivity_alpha = alpha
 
     def split_input(self, input_4: Tensor) -> Tuple[Tensor, Tensor]:
         """Split [4*batch] input into pos and neg."""
@@ -200,6 +205,7 @@ class BackwardBuilder:
         is_output_layer = ctx.is_output_layer
         cache = getattr(ctx, '_dc_cache', None)
         layer_name = getattr(ctx, '_dc_layer_name', None)
+        alpha = getattr(ctx, '_dc_sensitivity_alpha', 0.0)
 
         # Initialize deltas from gradient
         delta_pp, delta_np, delta_pn, delta_nn = init_backward(grad_4, is_output_layer)
@@ -214,6 +220,12 @@ class BackwardBuilder:
                 new_pp, new_np, new_pn, new_nn = cache.align_backward(
                     layer_name, new_pp, new_np, new_pn, new_nn
                 )
+
+        # Apply sensitivity shift for numerical stability
+        if alpha > 0.0:
+            new_pp, new_np, new_pn, new_nn = shift_sensitivities(
+                new_pp, new_np, new_pn, new_nn, alpha
+            )
 
         # Build gradient tensor
         grad = make_grad_4(new_pp, new_np, new_pn, new_nn)
@@ -245,6 +257,7 @@ class BackwardBuilder:
         is_output_layer = ctx.is_output_layer
         cache = getattr(ctx, '_dc_cache', None)
         layer_name = getattr(ctx, '_dc_layer_name', None)
+        alpha = getattr(ctx, '_dc_sensitivity_alpha', 0.0)
 
         # Initialize deltas from gradient
         delta_pp, delta_np, delta_pn, delta_nn = init_backward(grad_4, is_output_layer)
@@ -264,6 +277,12 @@ class BackwardBuilder:
                     new_pp, new_np, new_pn, new_nn = cache.align_backward(
                         layer_name, new_pp, new_np, new_pn, new_nn
                     )
+
+            # Apply sensitivity shift for numerical stability
+            if alpha > 0.0:
+                new_pp, new_np, new_pn, new_nn = shift_sensitivities(
+                    new_pp, new_np, new_pn, new_nn, alpha
+                )
 
             grads.append(make_grad_4(new_pp, new_np, new_pn, new_nn))
 

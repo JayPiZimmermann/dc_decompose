@@ -35,8 +35,8 @@ class DCMulFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, input_4: Tensor, operand_4: Tensor,
-                is_output_layer: bool, cache, layer_name) -> Tensor:
-        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name)
+                is_output_layer: bool, cache, layer_name, alpha: float) -> Tensor:
+        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name, alpha)
         A_pos, A_neg = fb.split_input(input_4)
         B_pos, B_neg = fb.split_input(operand_4)
 
@@ -71,8 +71,8 @@ class DCScalarMulFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, input_4: Tensor, scalar: float,
-                is_output_layer: bool, cache, layer_name) -> Tensor:
-        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name)
+                is_output_layer: bool, cache, layer_name, alpha: float) -> Tensor:
+        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name, alpha)
         A_pos, A_neg = fb.split_input(input_4)
 
         if scalar >= 0:
@@ -104,24 +104,24 @@ class DCScalarMulFunction(torch.autograd.Function):
 
             return new_pp, new_np, new_pn, new_nn
 
-        return BackwardBuilder.run(ctx, grad_4, compute, num_extra_returns=4)
+        return BackwardBuilder.run(ctx, grad_4, compute, num_extra_returns=5)
 
 
 def dc_forward_mul(module: DCMul, A: Tensor, B: Optional[Tensor] = None) -> Tensor:
     """DC forward for element-wise multiplication."""
-    cache, layer_name = get_cache_info(module)
+    cache, layer_name, alpha = get_cache_info(module)
     if module.scalar is not None:
         return DCScalarMulFunction.apply(
             A, module.scalar,
             getattr(module, DC_IS_OUTPUT_LAYER, False),
-            cache, layer_name,
+            cache, layer_name, alpha,
         )
     elif B is not None:
         operand_4 = make_output_4(F.relu(B), F.relu(-B))
         return DCMulFunction.apply(
             A, operand_4,
             getattr(module, DC_IS_OUTPUT_LAYER, False),
-            cache, layer_name,
+            cache, layer_name, alpha,
         )
     else:
         raise ValueError("Either provide B tensor or set scalar in __init__")

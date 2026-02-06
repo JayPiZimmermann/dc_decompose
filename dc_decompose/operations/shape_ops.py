@@ -24,8 +24,8 @@ class DCFlattenFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, input_4: Tensor, start_dim: int, end_dim: int,
-                is_output_layer: bool, cache, layer_name) -> Tensor:
-        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name)
+                is_output_layer: bool, cache, layer_name, alpha: float) -> Tensor:
+        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name, alpha)
         pos, neg = fb.split_input(input_4)
 
         ctx.input_shape = pos.shape
@@ -44,14 +44,14 @@ class DCFlattenFunction(torch.autograd.Function):
             new_nn = delta_nn.view(ctx.input_shape)
             return new_pp, new_np, new_pn, new_nn
 
-        return BackwardBuilder.run(ctx, grad_4, compute, num_extra_returns=5)
+        return BackwardBuilder.run(ctx, grad_4, compute, num_extra_returns=6)
 
 
 def dc_forward_flatten(m: nn.Flatten, x: Tensor) -> Tensor:
-    cache, layer_name = get_cache_info(m)
+    cache, layer_name, alpha = get_cache_info(m)
     return DCFlattenFunction.apply(x, m.start_dim, m.end_dim,
                                     getattr(m, DC_IS_OUTPUT_LAYER, False),
-                                    cache, layer_name)
+                                    cache, layer_name, alpha)
 
 
 patch_flatten = create_patch_function(dc_forward_flatten)
@@ -66,8 +66,8 @@ class DCUnflattenFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, input_4: Tensor, dim: int, unflattened_size: Tuple[int, ...],
-                is_output_layer: bool, cache, layer_name) -> Tensor:
-        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name)
+                is_output_layer: bool, cache, layer_name, alpha: float) -> Tensor:
+        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name, alpha)
         pos, neg = fb.split_input(input_4)
 
         ctx.input_shape = pos.shape
@@ -89,14 +89,14 @@ class DCUnflattenFunction(torch.autograd.Function):
             new_nn = delta_nn.flatten(ctx.dim, end_dim)
             return new_pp, new_np, new_pn, new_nn
 
-        return BackwardBuilder.run(ctx, grad_4, compute, num_extra_returns=5)
+        return BackwardBuilder.run(ctx, grad_4, compute, num_extra_returns=6)
 
 
 def dc_forward_unflatten(m: nn.Unflatten, x: Tensor) -> Tensor:
-    cache, layer_name = get_cache_info(m)
+    cache, layer_name, alpha = get_cache_info(m)
     return DCUnflattenFunction.apply(x, m.dim, m.unflattened_size,
                                       getattr(m, DC_IS_OUTPUT_LAYER, False),
-                                      cache, layer_name)
+                                      cache, layer_name, alpha)
 
 
 patch_unflatten = create_patch_function(dc_forward_unflatten)
@@ -122,8 +122,8 @@ class DCReshapeFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, input_4: Tensor, shape: Tuple[int, ...],
-                is_output_layer: bool, cache, layer_name) -> Tensor:
-        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name)
+                is_output_layer: bool, cache, layer_name, alpha: float) -> Tensor:
+        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name, alpha)
         pos, neg = fb.split_input(input_4)
 
         ctx.input_shape = pos.shape
@@ -143,14 +143,14 @@ class DCReshapeFunction(torch.autograd.Function):
             new_nn = delta_nn.reshape(ctx.input_shape)
             return new_pp, new_np, new_pn, new_nn
 
-        return BackwardBuilder.run(ctx, grad_4, compute, num_extra_returns=4)
+        return BackwardBuilder.run(ctx, grad_4, compute, num_extra_returns=5)
 
 
 def dc_forward_reshape(m: Reshape, x: Tensor) -> Tensor:
-    cache, layer_name = get_cache_info(m)
+    cache, layer_name, alpha = get_cache_info(m)
     return DCReshapeFunction.apply(x, m.shape,
                                     getattr(m, DC_IS_OUTPUT_LAYER, False),
-                                    cache, layer_name)
+                                    cache, layer_name, alpha)
 
 
 patch_reshape = create_patch_function(dc_forward_reshape)
@@ -174,10 +174,10 @@ class View(nn.Module):
 
 def dc_forward_view(m: View, x: Tensor) -> Tensor:
     # View and reshape have same behavior for DC
-    cache, layer_name = get_cache_info(m)
+    cache, layer_name, alpha = get_cache_info(m)
     return DCReshapeFunction.apply(x, m.shape,
                                     getattr(m, DC_IS_OUTPUT_LAYER, False),
-                                    cache, layer_name)
+                                    cache, layer_name, alpha)
 
 
 patch_view = create_patch_function(dc_forward_view)
@@ -205,8 +205,8 @@ class DCSqueezeFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, input_4: Tensor, dim: int,
-                is_output_layer: bool, cache, layer_name) -> Tensor:
-        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name)
+                is_output_layer: bool, cache, layer_name, alpha: float) -> Tensor:
+        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name, alpha)
         pos, neg = fb.split_input(input_4)
 
         ctx.input_shape = pos.shape
@@ -230,14 +230,14 @@ class DCSqueezeFunction(torch.autograd.Function):
             new_nn = delta_nn.view(ctx.input_shape)
             return new_pp, new_np, new_pn, new_nn
 
-        return BackwardBuilder.run(ctx, grad_4, compute, num_extra_returns=4)
+        return BackwardBuilder.run(ctx, grad_4, compute, num_extra_returns=5)
 
 
 def dc_forward_squeeze(m: Squeeze, x: Tensor) -> Tensor:
-    cache, layer_name = get_cache_info(m)
+    cache, layer_name, alpha = get_cache_info(m)
     return DCSqueezeFunction.apply(x, m.dim,
                                     getattr(m, DC_IS_OUTPUT_LAYER, False),
-                                    cache, layer_name)
+                                    cache, layer_name, alpha)
 
 
 patch_squeeze = create_patch_function(dc_forward_squeeze)
@@ -263,8 +263,8 @@ class DCUnsqueezeFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, input_4: Tensor, dim: int,
-                is_output_layer: bool, cache, layer_name) -> Tensor:
-        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name)
+                is_output_layer: bool, cache, layer_name, alpha: float) -> Tensor:
+        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name, alpha)
         pos, neg = fb.split_input(input_4)
 
         ctx.dim = dim
@@ -283,14 +283,14 @@ class DCUnsqueezeFunction(torch.autograd.Function):
             new_nn = delta_nn.squeeze(ctx.dim)
             return new_pp, new_np, new_pn, new_nn
 
-        return BackwardBuilder.run(ctx, grad_4, compute, num_extra_returns=4)
+        return BackwardBuilder.run(ctx, grad_4, compute, num_extra_returns=5)
 
 
 def dc_forward_unsqueeze(m: Unsqueeze, x: Tensor) -> Tensor:
-    cache, layer_name = get_cache_info(m)
+    cache, layer_name, alpha = get_cache_info(m)
     return DCUnsqueezeFunction.apply(x, m.dim,
                                       getattr(m, DC_IS_OUTPUT_LAYER, False),
-                                      cache, layer_name)
+                                      cache, layer_name, alpha)
 
 
 patch_unsqueeze = create_patch_function(dc_forward_unsqueeze)
@@ -317,8 +317,8 @@ class DCTransposeFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, input_4: Tensor, dim0: int, dim1: int,
-                is_output_layer: bool, cache, layer_name) -> Tensor:
-        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name)
+                is_output_layer: bool, cache, layer_name, alpha: float) -> Tensor:
+        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name, alpha)
         pos, neg = fb.split_input(input_4)
 
         ctx.dim0, ctx.dim1 = dim0, dim1
@@ -338,14 +338,14 @@ class DCTransposeFunction(torch.autograd.Function):
             new_nn = delta_nn.transpose(ctx.dim0, ctx.dim1)
             return new_pp, new_np, new_pn, new_nn
 
-        return BackwardBuilder.run(ctx, grad_4, compute, num_extra_returns=5)
+        return BackwardBuilder.run(ctx, grad_4, compute, num_extra_returns=6)
 
 
 def dc_forward_transpose(m: Transpose, x: Tensor) -> Tensor:
-    cache, layer_name = get_cache_info(m)
+    cache, layer_name, alpha = get_cache_info(m)
     return DCTransposeFunction.apply(x, m.dim0, m.dim1,
                                       getattr(m, DC_IS_OUTPUT_LAYER, False),
-                                      cache, layer_name)
+                                      cache, layer_name, alpha)
 
 
 patch_transpose = create_patch_function(dc_forward_transpose)
@@ -371,8 +371,8 @@ class DCPermuteFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, input_4: Tensor, dims: Tuple[int, ...],
-                is_output_layer: bool, cache, layer_name) -> Tensor:
-        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name)
+                is_output_layer: bool, cache, layer_name, alpha: float) -> Tensor:
+        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name, alpha)
         pos, neg = fb.split_input(input_4)
 
         ctx.dims = dims
@@ -396,14 +396,14 @@ class DCPermuteFunction(torch.autograd.Function):
             new_nn = delta_nn.permute(inv_dims)
             return new_pp, new_np, new_pn, new_nn
 
-        return BackwardBuilder.run(ctx, grad_4, compute, num_extra_returns=4)
+        return BackwardBuilder.run(ctx, grad_4, compute, num_extra_returns=5)
 
 
 def dc_forward_permute(m: Permute, x: Tensor) -> Tensor:
-    cache, layer_name = get_cache_info(m)
+    cache, layer_name, alpha = get_cache_info(m)
     return DCPermuteFunction.apply(x, m.dims,
                                     getattr(m, DC_IS_OUTPUT_LAYER, False),
-                                    cache, layer_name)
+                                    cache, layer_name, alpha)
 
 
 patch_permute = create_patch_function(dc_forward_permute)
@@ -417,22 +417,22 @@ unpatch_permute = create_unpatch_function()
 class DCDropoutFunction(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, input_4: Tensor, is_output_layer: bool, cache, layer_name) -> Tensor:
+    def forward(ctx, input_4: Tensor, is_output_layer: bool, cache, layer_name, alpha: float) -> Tensor:
         # In DC mode, dropout is identity (should only be used in eval mode)
-        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name)
+        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name, alpha)
         return input_4
 
     @staticmethod
-    def backward(ctx, grad_4: Tensor) -> Tuple[Tensor, None, None, None]:
+    def backward(ctx, grad_4: Tensor) -> Tuple[Tensor, None, None, None, None]:
         # Identity backward
-        return grad_4, None, None, None
+        return grad_4, None, None, None, None
 
 
 def dc_forward_dropout(m: nn.Dropout, x: Tensor) -> Tensor:
-    cache, layer_name = get_cache_info(m)
+    cache, layer_name, alpha = get_cache_info(m)
     return DCDropoutFunction.apply(x,
                                     getattr(m, DC_IS_OUTPUT_LAYER, False),
-                                    cache, layer_name)
+                                    cache, layer_name, alpha)
 
 
 patch_dropout = create_patch_function(dc_forward_dropout)

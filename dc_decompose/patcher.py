@@ -23,7 +23,10 @@ from dataclasses import dataclass
 from typing import Optional, List, TYPE_CHECKING
 from torch import Tensor
 
-from .operations.base import DC_ENABLED, DC_ORIGINAL_FORWARD, DC_IS_OUTPUT_LAYER
+from .operations.base import (
+    DC_ENABLED, DC_ORIGINAL_FORWARD, DC_IS_OUTPUT_LAYER,
+    DC_SENSITIVITY_ALPHA, compute_frobenius_alpha,
+)
 
 if TYPE_CHECKING:
     from .alignment_cache import AlignmentCache, AlignmentMode
@@ -224,6 +227,48 @@ def unpatch_model(model: nn.Module) -> None:
             unpatch_dcmatmul(module)
         elif isinstance(module, DCMul):
             unpatch_dcmul(module)
+
+
+def set_sensitivity_alpha(
+    model: nn.Module,
+    alpha: float = 0.0,
+    mode: str = 'constant',
+    default_alpha: float = 0.5,
+) -> None:
+    """
+    Set sensitivity shift alpha on all modules for numerical stability.
+
+    The alpha parameter controls how much to shift sensitivities to reduce
+    magnitudes while preserving the gradient reconstruction.
+
+    Args:
+        model: The PyTorch model
+        alpha: Alpha value for constant mode (0 = no shift, 0.5 = typical for add layers)
+        mode: How to determine alpha per module:
+            - 'constant': Use the same alpha for all modules
+            - 'frobenius': Compute alpha from Frobenius norm of weights.
+              Modules with weights use alpha = (1 - 1/rho) / 2 where rho is Frobenius norm.
+              Modules without weights (ReLU, pooling) use default_alpha.
+        default_alpha: Alpha to use for non-weight modules in 'frobenius' mode
+    """
+    _lazy_import_mul_mean()
+
+    for name, module in model.named_modules():
+        if mode == 'constant':
+            setattr(module, DC_SENSITIVITY_ALPHA, alpha)
+        elif mode == 'frobenius':
+            # Modules with weights: compute from Frobenius norm
+            if hasattr(module, 'weight') and module.weight is not None:
+                computed_alpha = compute_frobenius_alpha(module.weight)
+                setattr(module, DC_SENSITIVITY_ALPHA, computed_alpha)
+            elif isinstance(module, Add):
+                # Add modules always use default_alpha (typically 0.5)
+                setattr(module, DC_SENSITIVITY_ALPHA, default_alpha)
+            else:
+                # Non-weight modules (ReLU, MaxPool, etc.): use default_alpha
+                setattr(module, DC_SENSITIVITY_ALPHA, default_alpha)
+        else:
+            raise ValueError(f"Unknown alpha mode: {mode}. Use 'constant' or 'frobenius'.")
 
 
 def mark_output_layer(module: nn.Module, beta: float = 1.0) -> None:

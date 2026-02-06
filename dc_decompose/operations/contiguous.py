@@ -30,8 +30,8 @@ class Contiguous(nn.Module):
 class DCContiguousFunction(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, input_4: Tensor, is_output_layer: bool, cache, layer_name) -> Tensor:
-        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name)
+    def forward(ctx, input_4: Tensor, is_output_layer: bool, cache, layer_name, alpha: float) -> Tensor:
+        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name, alpha)
         pos, neg = fb.split_input(input_4)
 
         out_pos = pos.contiguous()
@@ -44,15 +44,15 @@ class DCContiguousFunction(torch.autograd.Function):
         def compute(_ctx, delta_pp, delta_np, delta_pn, delta_nn):
             return delta_pp, delta_np, delta_pn, delta_nn
 
-        return BackwardBuilder.run(ctx, grad_4, compute, num_extra_returns=3)
+        return BackwardBuilder.run(ctx, grad_4, compute, num_extra_returns=4)
 
 
 def dc_forward_contiguous(module: Contiguous, input: Tensor) -> Tensor:
-    cache, layer_name = get_cache_info(module)
+    cache, layer_name, alpha = get_cache_info(module)
     return DCContiguousFunction.apply(
         input,
         getattr(module, DC_IS_OUTPUT_LAYER, False),
-        cache, layer_name,
+        cache, layer_name, alpha,
     )
 
 

@@ -34,7 +34,7 @@ from torch import Tensor
 from typing import Dict, List, Optional, Tuple, Union, Callable
 from dataclasses import dataclass, field
 
-from dc_decompose.patcher import prepare_model_for_dc, unpatch_model
+from dc_decompose.patcher import prepare_model_for_dc, unpatch_model, set_sensitivity_alpha
 from dc_decompose.functional_replacer import replace_functional_with_modules
 from dc_decompose.operations.base import (
     init_catted, reconstruct_output, InputMode, split4,
@@ -66,6 +66,10 @@ INIT_LARGER_WEIGHTS = False         # Initialize weights with larger values for 
 # Alignment settings - when enabled, DC outputs are corrected to match original values exactly
 ALIGN_FORWARD = True               # Align forward pass (DC pos-neg = original activation)
 ALIGN_BACKWARD = True              # Align backward pass (DC sensitivities = original gradient)
+
+# Sensitivity shift alpha - reduces sensitivity magnitudes for numerical stability
+# Set to a float for constant alpha (e.g., 0.5), or "frobenius" to compute from weights
+ALPHA = 0.0  # 0.0 = disabled, "frobenius" = compute from Frobenius norm, float = constant
 
 
 # =============================================================================
@@ -489,6 +493,12 @@ def test_model_functional(
             target_grad=target_grad,
         )
 
+        # Apply sensitivity alpha if configured
+        if ALPHA == "frobenius":
+            set_sensitivity_alpha(model, mode='frobenius')
+        elif isinstance(ALPHA, (int, float)) and ALPHA > 0:
+            set_sensitivity_alpha(model, alpha=float(ALPHA), mode='constant')
+
         # Get alignment cache from model (if alignment is enabled)
         alignment_cache = None
         for module in model.modules():
@@ -647,6 +657,12 @@ def test_model_context_manager(
             x=x,
             target_grad=target_grad,
         )
+
+        # Apply sensitivity alpha if configured
+        if ALPHA == "frobenius":
+            set_sensitivity_alpha(model, mode='frobenius')
+        elif isinstance(ALPHA, (int, float)) and ALPHA > 0:
+            set_sensitivity_alpha(model, alpha=float(ALPHA), mode='constant')
 
         # Get alignment cache from model (if alignment is enabled)
         alignment_cache = None

@@ -27,8 +27,8 @@ class DCLinearFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, input_4: Tensor, weight: Tensor, bias: Optional[Tensor],
-                is_output_layer: bool, cache, layer_name) -> Tensor:
-        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name)
+                is_output_layer: bool, cache, layer_name, alpha: float) -> Tensor:
+        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name, alpha)
         pos, neg = fb.split_input(input_4)
 
         # Split weights into positive and negative parts
@@ -62,15 +62,15 @@ class DCLinearFunction(torch.autograd.Function):
 
             return new_pp, new_np, new_pn, new_nn
 
-        return BackwardBuilder.run(ctx, grad_4, compute, num_extra_returns=5)
+        return BackwardBuilder.run(ctx, grad_4, compute, num_extra_returns=6)
 
 
 def dc_forward_linear(module: nn.Linear, input_4: Tensor) -> Tensor:
-    cache, layer_name = get_cache_info(module)
+    cache, layer_name, alpha = get_cache_info(module)
     return DCLinearFunction.apply(
         input_4, module.weight, module.bias,
         getattr(module, DC_IS_OUTPUT_LAYER, False),
-        cache, layer_name,
+        cache, layer_name, alpha,
     )
 
 

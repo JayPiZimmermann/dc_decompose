@@ -22,8 +22,8 @@ class DCConv1dFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input_4: Tensor, weight: Tensor, bias: Optional[Tensor],
                 stride, padding, dilation, groups,
-                is_output_layer: bool, cache, layer_name) -> Tensor:
-        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name)
+                is_output_layer: bool, cache, layer_name, alpha: float) -> Tensor:
+        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name, alpha)
         pos, neg = fb.split_input(input_4)
 
         weight_pos = F.relu(weight)
@@ -69,16 +69,16 @@ class DCConv1dFunction(torch.autograd.Function):
 
             return new_pp, new_np, new_pn, new_nn
 
-        return BackwardBuilder.run(ctx, grad_4, compute, num_extra_returns=9)
+        return BackwardBuilder.run(ctx, grad_4, compute, num_extra_returns=10)
 
 
 def dc_forward_conv1d(m: nn.Conv1d, x: Tensor) -> Tensor:
-    cache, layer_name = get_cache_info(m)
+    cache, layer_name, alpha = get_cache_info(m)
     return DCConv1dFunction.apply(
         x, m.weight, m.bias,
         m.stride[0], m.padding[0], m.dilation[0], m.groups,
         getattr(m, DC_IS_OUTPUT_LAYER, False),
-        cache, layer_name,
+        cache, layer_name, alpha,
     )
 
 
@@ -95,8 +95,8 @@ class DCConv2dFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input_4: Tensor, weight: Tensor, bias: Optional[Tensor],
                 stride, padding, dilation, groups,
-                is_output_layer: bool, cache, layer_name) -> Tensor:
-        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name)
+                is_output_layer: bool, cache, layer_name, alpha: float) -> Tensor:
+        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name, alpha)
         pos, neg = fb.split_input(input_4)
 
         weight_pos = F.relu(weight)
@@ -143,16 +143,16 @@ class DCConv2dFunction(torch.autograd.Function):
 
             return new_pp, new_np, new_pn, new_nn
 
-        return BackwardBuilder.run(ctx, grad_4, compute, num_extra_returns=9)
+        return BackwardBuilder.run(ctx, grad_4, compute, num_extra_returns=10)
 
 
 def dc_forward_conv2d(m: nn.Conv2d, x: Tensor) -> Tensor:
-    cache, layer_name = get_cache_info(m)
+    cache, layer_name, alpha = get_cache_info(m)
     return DCConv2dFunction.apply(
         x, m.weight, m.bias,
         m.stride, m.padding, m.dilation, m.groups,
         getattr(m, DC_IS_OUTPUT_LAYER, False),
-        cache, layer_name,
+        cache, layer_name, alpha,
     )
 
 

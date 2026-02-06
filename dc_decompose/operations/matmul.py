@@ -61,8 +61,8 @@ class DCMatMulFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, input_4: Tensor, operand_4: Tensor, transpose_b: bool,
-                is_output_layer: bool, cache, layer_name) -> Tensor:
-        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name)
+                is_output_layer: bool, cache, layer_name, alpha: float) -> Tensor:
+        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name, alpha)
         A_pos, A_neg = fb.split_input(input_4)
         B_pos, B_neg = fb.split_input(operand_4)
 
@@ -106,11 +106,11 @@ class DCMatMulFunction(torch.autograd.Function):
 
             return (new_pp_A, new_np_A, new_pn_A, new_nn_A), (new_pp_B, new_np_B, new_pn_B, new_nn_B)
 
-        return BackwardBuilder.run_multi(ctx, grad_4, compute, num_outputs=2, num_extra_returns=4)
+        return BackwardBuilder.run_multi(ctx, grad_4, compute, num_outputs=2, num_extra_returns=5)
 
 
 def dc_forward_matmul(module: DCMatMul, A: Tensor, B: Optional[Tensor] = None) -> Tensor:
-    cache, layer_name = get_cache_info(module)
+    cache, layer_name, alpha = get_cache_info(module)
     if module._has_weight:
         B_weight = module.weight.t() if not module.transpose_b else module.weight
         operand_4 = make_output_4(F.relu(B_weight), F.relu(-B_weight))
@@ -126,7 +126,7 @@ def dc_forward_matmul(module: DCMatMul, A: Tensor, B: Optional[Tensor] = None) -
     return DCMatMulFunction.apply(
         A, operand_4, module.transpose_b,
         getattr(module, DC_IS_OUTPUT_LAYER, False),
-        cache, layer_name,
+        cache, layer_name, alpha,
     )
 
 

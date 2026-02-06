@@ -41,8 +41,8 @@ class DCMeanFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, input_4: Tensor, dim, keepdim: bool,
-                is_output_layer: bool, cache, layer_name) -> Tensor:
-        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name)
+                is_output_layer: bool, cache, layer_name, alpha: float) -> Tensor:
+        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name, alpha)
         pos, neg = fb.split_input(input_4)
 
         # Apply mean to both streams
@@ -102,16 +102,16 @@ class DCMeanFunction(torch.autograd.Function):
 
             return new_pp, new_np, new_pn, new_nn
 
-        return BackwardBuilder.run(ctx, grad_4, compute, num_extra_returns=5)
+        return BackwardBuilder.run(ctx, grad_4, compute, num_extra_returns=6)
 
 
 def dc_forward_mean(module: Mean, input: Tensor) -> Tensor:
     """DC forward for mean operation."""
-    cache, layer_name = get_cache_info(module)
+    cache, layer_name, alpha = get_cache_info(module)
     return DCMeanFunction.apply(
         input, module.dim, module.keepdim,
         getattr(module, DC_IS_OUTPUT_LAYER, False),
-        cache, layer_name,
+        cache, layer_name, alpha,
     )
 
 
