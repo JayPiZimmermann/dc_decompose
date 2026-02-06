@@ -61,7 +61,7 @@ SHOW_ACTIVATION_NORMS = True       # Show ||pos||, ||neg|| columns
 SHOW_ORIGINAL_GRAD_NORMS = True    # Show ||∇_orig|| column
 SHOW_CORRECTION_NORMS = True      # Show ||Δfwd||, ||Δbwd|| alignment correction columns
 INIT_RANDOM_BIASES = True          # Initialize biases randomly (not zeros)
-INIT_LARGER_WEIGHTS = False         # Initialize weights with larger values for more significant gradients
+INIT_LARGER_WEIGHTS = True         # Initialize weights with larger values for more significant gradients
 
 # Alignment settings - when enabled, DC outputs are corrected to match original values exactly
 ALIGN_FORWARD = True               # Align forward pass (DC pos-neg = original activation)
@@ -564,6 +564,19 @@ def test_model_functional(
         )
 
         # =====================================================================
+        # Populate correction norms from AlignmentCache
+        # =====================================================================
+        if alignment_cache is not None:
+            correction_stats = {s.layer_name: s for s in alignment_cache.get_correction_stats()}
+            for lr in result.layer_results:
+                if lr.name in correction_stats:
+                    stats = correction_stats[lr.name]
+                    lr.fwd_correction_norm = stats.forward_correction_norm
+                    lr.bwd_correction_norm = stats.backward_correction_norm
+                    lr.fwd_relative_correction = stats.forward_relative_correction
+                    lr.bwd_relative_correction = stats.backward_relative_correction
+
+        # =====================================================================
         # Compute overall errors
         # =====================================================================
 
@@ -725,6 +738,19 @@ def test_model_context_manager(
             sens_grad=grad_dc, orig_grad=grad_orig,
             input_grad_raw=input_grad_raw
         )
+
+        # =====================================================================
+        # Populate correction norms from AlignmentCache
+        # =====================================================================
+        if alignment_cache is not None:
+            correction_stats = {s.layer_name: s for s in alignment_cache.get_correction_stats()}
+            for lr in result.layer_results:
+                if lr.name in correction_stats:
+                    stats = correction_stats[lr.name]
+                    lr.fwd_correction_norm = stats.forward_correction_norm
+                    lr.bwd_correction_norm = stats.backward_correction_norm
+                    lr.fwd_relative_correction = stats.forward_relative_correction
+                    lr.bwd_relative_correction = stats.backward_relative_correction
 
         # =====================================================================
         # Compute overall errors
