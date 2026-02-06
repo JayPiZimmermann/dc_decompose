@@ -382,13 +382,15 @@ class AlignmentCache:
         # Track correction norm
         data.backward_correction_norm = correction.norm().item()
 
-        # Apply correction by distributing to pp and nn
-        # Adding to pp increases reconstruction, adding to nn decreases it
-        # We add positive correction to pp, negative correction to nn
+        # Apply correction by distributing to pp and np
+        # grad = pp - np - pn + nn
+        # Adding to pp increases grad, adding to np decreases grad
+        # For positive correction: add to pp
+        # For negative correction: add |correction| to np (which subtracts from grad)
         aligned_pp = delta_pp + torch.relu(correction)
-        aligned_nn = delta_nn + torch.relu(-correction)
+        aligned_np = delta_np + torch.relu(-correction)
 
-        return aligned_pp, delta_np, delta_pn, aligned_nn
+        return aligned_pp, aligned_np, delta_pn, delta_nn
 
     # =========================================================================
     # Cached Mask Access (for backward-only mode)
