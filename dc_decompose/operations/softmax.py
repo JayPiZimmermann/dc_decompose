@@ -24,22 +24,30 @@ class DCSoftmaxFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input_4: Tensor, dim: int,
                 is_output_layer: bool, cache, layer_name, alpha: float) -> Tensor:
-        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name, alpha)
-        pos, neg = fb.split_input(input_4)
-        z = pos - neg
+        
+        def compute(ctx, pos, neg, dim):
+            z = pos - neg
 
-        # Compute softmax on z
-        s = F.softmax(z, dim=dim)
+            # Compute softmax on z
+            s = F.softmax(z, dim=dim)
 
-        # Softmax output is always positive, so out_pos = s, out_neg = 0
-        out_pos = s
-        out_neg = torch.zeros_like(s)
+            # Softmax output is always positive, so out_pos = s, out_neg = 0
+            out_pos = s
+            out_neg = torch.zeros_like(s)
 
-        # Cache for backward
-        ctx.save_for_backward(s)
-        ctx.dim = dim
+            # Cache for backward
+            ctx.save_for_backward(s)
+            ctx.dim = dim
 
-        return make_output_4(out_pos, out_neg)
+            return out_pos, out_neg
+
+        # Softmax needs special output handling, so we get raw outputs and combine manually
+        pos, neg = ForwardBuilder.run(
+            ctx, input_4, compute, is_output_layer, cache, layer_name, alpha,
+            recenter=False, return_raw=True,
+            extra_args=(dim,)
+        )
+        return make_output_4(pos, neg)
 
     @staticmethod
     def backward(ctx, grad_4: Tensor) -> Tuple[Tensor, None, None, None, None]:

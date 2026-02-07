@@ -27,13 +27,13 @@ from .dc_tester import (
     LayerResult,
 
     # Tolerances
-    DEFAULT_FWD_ABS_TOL,
     DEFAULT_FWD_REL_TOL,
-    DEFAULT_BWD_ABS_TOL,
     DEFAULT_BWD_REL_TOL,
+    DEFAULT_FWD_CORRECTION_REL_TOL,
+    DEFAULT_BWD_CORRECTION_REL_TOL,
 
     # Helper
-    check_pass,
+    check_pass_relative_only,
 )
 
 __all__ = [
@@ -44,9 +44,9 @@ __all__ = [
     'test_model_simple',
     'TestResult',
     'LayerResult',
-    'DEFAULT_FWD_ABS_TOL',
     'DEFAULT_FWD_REL_TOL',
-    'DEFAULT_BWD_ABS_TOL',
     'DEFAULT_BWD_REL_TOL',
-    'check_pass',
+    'DEFAULT_FWD_CORRECTION_REL_TOL',
+    'DEFAULT_BWD_CORRECTION_REL_TOL',
+    'check_pass_relative_only',
 ]

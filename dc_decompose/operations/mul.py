@@ -36,16 +36,22 @@ class DCMulFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input_4: Tensor, operand_4: Tensor,
                 is_output_layer: bool, cache, layer_name, alpha: float) -> Tensor:
-        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name, alpha)
-        A_pos, A_neg = fb.split_input(input_4)
-        B_pos, B_neg = fb.split_input(operand_4)
+        
+        def compute(ctx, A_pos, A_neg, operand_4):
+            from .base import split_input_4
+            B_pos, B_neg = split_input_4(operand_4)
 
-        out_pos = A_pos * B_pos + A_neg * B_neg
-        out_neg = A_pos * B_neg + A_neg * B_pos
+            out_pos = A_pos * B_pos + A_neg * B_neg
+            out_neg = A_pos * B_neg + A_neg * B_pos
 
-        ctx.save_for_backward(A_pos, A_neg, B_pos, B_neg)
+            ctx.save_for_backward(A_pos, A_neg, B_pos, B_neg)
 
-        return fb.build_output(out_pos, out_neg)
+            return out_pos, out_neg
+
+        return ForwardBuilder.run(
+            ctx, input_4, compute, is_output_layer, cache, layer_name, alpha,
+            extra_args=(operand_4,)
+        )
 
     @staticmethod
     def backward(ctx, grad_4: Tensor):
@@ -72,19 +78,23 @@ class DCScalarMulFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input_4: Tensor, scalar: float,
                 is_output_layer: bool, cache, layer_name, alpha: float) -> Tensor:
-        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name, alpha)
-        A_pos, A_neg = fb.split_input(input_4)
+        
+        def compute(ctx, A_pos, A_neg, scalar):
+            if scalar >= 0:
+                out_pos = A_pos * scalar
+                out_neg = A_neg * scalar
+            else:
+                out_pos = A_neg * abs(scalar)
+                out_neg = A_pos * abs(scalar)
 
-        if scalar >= 0:
-            out_pos = A_pos * scalar
-            out_neg = A_neg * scalar
-        else:
-            out_pos = A_neg * abs(scalar)
-            out_neg = A_pos * abs(scalar)
+            ctx.scalar = scalar
 
-        ctx.scalar = scalar
+            return out_pos, out_neg
 
-        return fb.build_output(out_pos, out_neg)
+        return ForwardBuilder.run(
+            ctx, input_4, compute, is_output_layer, cache, layer_name, alpha,
+            extra_args=(scalar,)
+        )
 
     @staticmethod
     def backward(ctx, grad_4: Tensor):

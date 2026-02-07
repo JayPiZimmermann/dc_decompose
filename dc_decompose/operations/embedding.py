@@ -21,20 +21,24 @@ class DCEmbeddingFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input_4: Tensor, weight: Tensor, padding_idx, max_norm, norm_type, scale_grad_by_freq, sparse,
                 is_output_layer: bool, cache, layer_name, alpha: float) -> Tensor:
-        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name, alpha)
-        pos_indices, neg_indices = fb.split_input(input_4)
+        
+        def compute(ctx, pos_indices, neg_indices, weight, padding_idx, max_norm, norm_type, scale_grad_by_freq, sparse):
+            out_pos = torch.nn.functional.embedding(pos_indices, weight, padding_idx, max_norm, norm_type, scale_grad_by_freq, sparse)
+            out_neg = torch.nn.functional.embedding(neg_indices, weight, padding_idx, max_norm, norm_type, scale_grad_by_freq, sparse)
 
-        out_pos = torch.nn.functional.embedding(pos_indices, weight, padding_idx, max_norm, norm_type, scale_grad_by_freq, sparse)
-        out_neg = torch.nn.functional.embedding(neg_indices, weight, padding_idx, max_norm, norm_type, scale_grad_by_freq, sparse)
+            ctx.save_for_backward(pos_indices, neg_indices, weight)
+            ctx.padding_idx = padding_idx
+            ctx.max_norm = max_norm
+            ctx.norm_type = norm_type
+            ctx.scale_grad_by_freq = scale_grad_by_freq
+            ctx.sparse = sparse
 
-        ctx.save_for_backward(pos_indices, neg_indices, weight)
-        ctx.padding_idx = padding_idx
-        ctx.max_norm = max_norm
-        ctx.norm_type = norm_type
-        ctx.scale_grad_by_freq = scale_grad_by_freq
-        ctx.sparse = sparse
+            return out_pos, out_neg
 
-        return fb.build_output(out_pos, out_neg)
+        return ForwardBuilder.run(
+            ctx, input_4, compute, is_output_layer, cache, layer_name, alpha,
+            extra_args=(weight, padding_idx, max_norm, norm_type, scale_grad_by_freq, sparse)
+        )
 
     @staticmethod
     def backward(ctx, grad_4: Tensor) -> Tuple[Tensor, ...]:

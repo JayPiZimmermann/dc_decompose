@@ -28,25 +28,29 @@ class DCLinearFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input_4: Tensor, weight: Tensor, bias: Optional[Tensor],
                 is_output_layer: bool, cache, layer_name, alpha: float) -> Tensor:
-        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name, alpha)
-        pos, neg = fb.split_input(input_4)
+        
+        def compute(ctx, pos, neg, weight, bias):
+            # Split weights into positive and negative parts
+            weight_pos = F.relu(weight)
+            weight_neg = F.relu(-weight)
 
-        # Split weights into positive and negative parts
-        weight_pos = F.relu(weight)
-        weight_neg = F.relu(-weight)
+            # DC forward: track positive and negative weight contributions separately
+            out_pos = F.linear(pos, weight_pos) + F.linear(neg, weight_neg)
+            out_neg = F.linear(pos, weight_neg) + F.linear(neg, weight_pos)
 
-        # DC forward: track positive and negative weight contributions separately
-        out_pos = F.linear(pos, weight_pos) + F.linear(neg, weight_neg)
-        out_neg = F.linear(pos, weight_neg) + F.linear(neg, weight_pos)
+            if bias is not None:
+                bias_pos = F.relu(bias)
+                bias_neg = F.relu(-bias)
+                out_pos = out_pos + bias_pos
+                out_neg = out_neg + bias_neg
 
-        if bias is not None:
-            bias_pos = F.relu(bias)
-            bias_neg = F.relu(-bias)
-            out_pos = out_pos + bias_pos
-            out_neg = out_neg + bias_neg
+            ctx.save_for_backward(weight)
+            return out_pos, out_neg
 
-        ctx.save_for_backward(weight)
-        return fb.build_output(out_pos, out_neg)
+        return ForwardBuilder.run(
+            ctx, input_4, compute, is_output_layer, cache, layer_name, alpha,
+            extra_args=(weight, bias)
+        )
 
     @staticmethod
     def backward(ctx, grad_4: Tensor):

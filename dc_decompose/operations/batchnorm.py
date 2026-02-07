@@ -20,67 +20,71 @@ class DCBatchNormFunction(torch.autograd.Function):
                 running_mean: Tensor, running_var: Tensor, eps: float,
                 momentum: float, is_training: bool, is_2d: bool,
                 is_output_layer: bool, cache, layer_name, alpha: float) -> Tensor:
-        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name, alpha)
-        pos, neg = fb.split_input(input_4)
-
-        with torch.no_grad():
-            if is_training:
-                # Training mode: compute batch statistics
-                if is_2d:
-                    dims = (0, 2, 3)
-                else:
-                    if pos.dim() == 3:
-                        dims = (0, 2)
+        
+        def compute(ctx, pos, neg, weight, bias, running_mean, running_var, eps, momentum, is_training, is_2d):
+            with torch.no_grad():
+                if is_training:
+                    # Training mode: compute batch statistics
+                    if is_2d:
+                        dims = (0, 2, 3)
                     else:
-                        dims = (0,)
+                        if pos.dim() == 3:
+                            dims = (0, 2)
+                        else:
+                            dims = (0,)
 
-                batch_mean = pos.mean(dim=dims, keepdim=False)
-                batch_var = pos.var(dim=dims, unbiased=False, keepdim=False)
+                    batch_mean = pos.mean(dim=dims, keepdim=False)
+                    batch_var = pos.var(dim=dims, unbiased=False, keepdim=False)
 
-                with torch.no_grad():
-                    running_mean.mul_(1 - momentum).add_(batch_mean, alpha=momentum)
-                    running_var.mul_(1 - momentum).add_(batch_var, alpha=momentum)
+                    with torch.no_grad():
+                        running_mean.mul_(1 - momentum).add_(batch_mean, alpha=momentum)
+                        running_var.mul_(1 - momentum).add_(batch_var, alpha=momentum)
 
-                mean_to_use = batch_mean
-                var_to_use = batch_var
+                    mean_to_use = batch_mean
+                    var_to_use = batch_var
+                else:
+                    mean_to_use = running_mean
+                    var_to_use = running_var
+
+                scale = weight / torch.sqrt(var_to_use + eps)
+                bias_eff = bias - scale * mean_to_use
+
+            scale_pos = F.relu(scale)
+            scale_neg = F.relu(-scale)
+            bias_pos = F.relu(bias_eff)
+            bias_neg = F.relu(-bias_eff)
+
+            if is_2d:
+                scale_pos = scale_pos.view(1, -1, 1, 1)
+                scale_neg = scale_neg.view(1, -1, 1, 1)
+                bias_pos = bias_pos.view(1, -1, 1, 1)
+                bias_neg = bias_neg.view(1, -1, 1, 1)
             else:
-                mean_to_use = running_mean
-                var_to_use = running_var
+                if pos.dim() == 3:
+                    scale_pos = scale_pos.view(1, -1, 1)
+                    scale_neg = scale_neg.view(1, -1, 1)
+                    bias_pos = bias_pos.view(1, -1, 1)
+                    bias_neg = bias_neg.view(1, -1, 1)
+                else:
+                    scale_pos = scale_pos.view(1, -1)
+                    scale_neg = scale_neg.view(1, -1)
+                    bias_pos = bias_pos.view(1, -1)
+                    bias_neg = bias_neg.view(1, -1)
 
-            scale = weight / torch.sqrt(var_to_use + eps)
-            bias_eff = bias - scale * mean_to_use
+            out_pos = scale_pos * pos + scale_neg * neg + bias_pos
+            out_neg = scale_neg * pos + scale_pos * neg + bias_neg
 
-        scale_pos = F.relu(scale)
-        scale_neg = F.relu(-scale)
-        bias_pos = F.relu(bias_eff)
-        bias_neg = F.relu(-bias_eff)
+            ctx.save_for_backward(weight, bias, mean_to_use, var_to_use)
+            ctx.eps = eps
+            ctx.is_2d = is_2d
+            ctx.pos_dim = pos.dim()
 
-        if is_2d:
-            scale_pos = scale_pos.view(1, -1, 1, 1)
-            scale_neg = scale_neg.view(1, -1, 1, 1)
-            bias_pos = bias_pos.view(1, -1, 1, 1)
-            bias_neg = bias_neg.view(1, -1, 1, 1)
-        else:
-            if pos.dim() == 3:
-                scale_pos = scale_pos.view(1, -1, 1)
-                scale_neg = scale_neg.view(1, -1, 1)
-                bias_pos = bias_pos.view(1, -1, 1)
-                bias_neg = bias_neg.view(1, -1, 1)
-            else:
-                scale_pos = scale_pos.view(1, -1)
-                scale_neg = scale_neg.view(1, -1)
-                bias_pos = bias_pos.view(1, -1)
-                bias_neg = bias_neg.view(1, -1)
+            return out_pos, out_neg
 
-        out_pos = scale_pos * pos + scale_neg * neg + bias_pos
-        out_neg = scale_neg * pos + scale_pos * neg + bias_neg
-
-        ctx.save_for_backward(weight, bias, mean_to_use, var_to_use)
-        ctx.eps = eps
-        ctx.is_2d = is_2d
-        ctx.pos_dim = pos.dim()
-
-        return fb.build_output(out_pos, out_neg)
+        return ForwardBuilder.run(
+            ctx, input_4, compute, is_output_layer, cache, layer_name, alpha,
+            extra_args=(weight, bias, running_mean, running_var, eps, momentum, is_training, is_2d)
+        )
 
     @staticmethod
     def backward(ctx, grad_4: Tensor):

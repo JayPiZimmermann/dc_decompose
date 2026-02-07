@@ -17,6 +17,7 @@ from .operations.add import Add
 from .operations.shape_ops import Reshape, View, Squeeze, Unsqueeze, Transpose, Permute
 from .operations.matmul import DCMatMul
 from .operations.mul import DCMul
+from .operations.tensor_ops import DCCat
 from .operations.base import DC_ENABLED, DC_ORIGINAL_FORWARD, DC_IS_OUTPUT_LAYER
 from .operations.base import split_input_4, make_output_4, split_grad_4, make_grad_4
 from .inline_module_replacer import replace_inline_modules
@@ -142,7 +143,7 @@ def _transform_module_forward(module: nn.Module, processed: set = None) -> None:
         nn.ReLU, nn.GELU, nn.Sigmoid, nn.Tanh, nn.Softmax,
         nn.Flatten, nn.Unflatten,
         Add, Reshape, View, Squeeze, Unsqueeze, Transpose, Permute,
-        DCMatMul, DCMul,
+        DCMatMul, DCMul, DCCat,
     )
     if isinstance(module, skip_types):
         return
@@ -162,7 +163,7 @@ def _transform_module_forward(module: nn.Module, processed: set = None) -> None:
     new_modules: Dict[str, nn.Module] = {}
     counter = {
         'relu': 0, 'gelu': 0, 'sigmoid': 0, 'tanh': 0, 'softmax': 0, 'add': 0,
-        'mul': 0, 'mean': 0, 'matmul': 0,
+        'mul': 0, 'mean': 0, 'matmul': 0, 'cat': 0,
         'flatten': 0, 'reshape': 0, 'view': 0, 'squeeze': 0, 'unsqueeze': 0,
         'transpose': 0, 'permute': 0
     }
@@ -216,7 +217,7 @@ def _has_functional_calls(module: nn.Module) -> bool:
             'torch.softmax', 'F.softmax',
             '.relu()', '.sigmoid()', '.tanh()',
             '+ identity', '+ x', 'out +', '+ out',
-            'torch.add',
+            'torch.add', 'torch.cat',
             'torch.flatten', 'torch.reshape', 'torch.squeeze', 'torch.unsqueeze',
             'torch.transpose', 'torch.permute',
             '.flatten()', '.reshape(', '.view(', '.squeeze(', '.unsqueeze(',
@@ -278,6 +279,13 @@ def _get_module_replacement(node: Node, counter: Dict[str, int], new_modules: Di
         keepdim = node.kwargs.get('keepdim', node.args[2] if len(node.args) > 2 else False)
         new_modules[name] = Mean(dim=dim, keepdim=keepdim)
         return name, False
+
+    if func == torch.cat:
+        name = f'_dc_cat_{counter["cat"]}'
+        counter['cat'] += 1
+        dim = node.kwargs.get('dim', node.args[1] if len(node.args) > 1 else 0)
+        new_modules[name] = DCCat(dim=dim)
+        return name, True  # Keep first argument (list of tensors)
 
     if func in (torch.relu, F.relu, torch.relu_):
         name = f'_dc_relu_{counter["relu"]}'

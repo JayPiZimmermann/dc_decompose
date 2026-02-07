@@ -31,13 +31,15 @@ class DCContiguousFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, input_4: Tensor, is_output_layer: bool, cache, layer_name, alpha: float) -> Tensor:
-        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name, alpha)
-        pos, neg = fb.split_input(input_4)
+        
+        def compute(ctx, pos, neg):
+            out_pos = pos.contiguous()
+            out_neg = neg.contiguous()
+            return out_pos, out_neg
 
-        out_pos = pos.contiguous()
-        out_neg = neg.contiguous()
-
-        return fb.build_output(out_pos, out_neg)
+        return ForwardBuilder.run(
+            ctx, input_4, compute, is_output_layer, cache, layer_name, alpha
+        )
 
     @staticmethod
     def backward(ctx, grad_4: Tensor):

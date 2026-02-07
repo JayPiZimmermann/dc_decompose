@@ -42,21 +42,25 @@ class DCSumFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input_4: Tensor, dim, keepdim: bool,
                 is_output_layer: bool, cache, layer_name, alpha: float) -> Tensor:
-        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name, alpha)
-        pos, neg = fb.split_input(input_4)
+        
+        def compute(ctx, pos, neg, dim, keepdim):
+            if dim is None:
+                out_pos = torch.sum(pos)
+                out_neg = torch.sum(neg)
+            else:
+                out_pos = torch.sum(pos, dim=dim, keepdim=keepdim)
+                out_neg = torch.sum(neg, dim=dim, keepdim=keepdim)
 
-        if dim is None:
-            out_pos = torch.sum(pos)
-            out_neg = torch.sum(neg)
-        else:
-            out_pos = torch.sum(pos, dim=dim, keepdim=keepdim)
-            out_neg = torch.sum(neg, dim=dim, keepdim=keepdim)
+            ctx.input_shape = pos.shape
+            ctx.dim = dim
+            ctx.keepdim = keepdim
 
-        ctx.input_shape = pos.shape
-        ctx.dim = dim
-        ctx.keepdim = keepdim
+            return out_pos, out_neg
 
-        return fb.build_output(out_pos, out_neg)
+        return ForwardBuilder.run(
+            ctx, input_4, compute, is_output_layer, cache, layer_name, alpha,
+            extra_args=(dim, keepdim)
+        )
 
     @staticmethod
     def backward(ctx, grad_4: Tensor):

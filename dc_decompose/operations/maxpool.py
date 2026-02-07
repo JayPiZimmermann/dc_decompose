@@ -25,6 +25,9 @@ class DCMaxPool2dFunction(torch.autograd.Function):
     def forward(ctx, input_4: Tensor, kernel_size, stride, padding,
                 is_output_layer: bool, cache: Optional['AlignmentCache'],
                 layer_name: Optional[str], alpha: float) -> Tensor:
+        
+        # MaxPool needs special cached indices handling, so we handle this case manually
+        # for now until we can properly integrate cached indices into ForwardBuilder.run
         fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name, alpha)
         pos, neg = fb.split_input(input_4)
 

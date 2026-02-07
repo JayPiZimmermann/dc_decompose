@@ -53,13 +53,16 @@ LossModelSpec = Tuple[ModelSpec, InputSpec, Tensor, LossFn]  # (model, input, ta
 
 
 # =============================================================================
-# Default Tolerances
+# Default Tolerances (Only Relative Thresholds)
 # =============================================================================
 
-DEFAULT_FWD_ABS_TOL = 1e-4
+# Relative error thresholds for forward/backward pass accuracy
 DEFAULT_FWD_REL_TOL = 1e-4
-DEFAULT_BWD_ABS_TOL = 1e-4
-DEFAULT_BWD_REL_TOL = 1e-4  # 1% relative error maximum (was 10%)
+DEFAULT_BWD_REL_TOL = 1e-4
+
+# Relative correction thresholds (corrections relative to original values)
+DEFAULT_FWD_CORRECTION_REL_TOL = 1e-3  # Forward corrections relative to original activations
+DEFAULT_BWD_CORRECTION_REL_TOL = 1e-3  # Backward corrections relative to original gradients
 
 
 # =============================================================================
@@ -79,7 +82,7 @@ ALIGN_BACKWARD = True              # Align backward pass (DC sensitivities = ori
 
 # Sensitivity shift alpha - reduces sensitivity magnitudes for numerical stability
 # Set to a float for constant alpha (e.g., 0.5), or "frobenius" to compute from weights
-ALPHA = 0.35  # 0.0 = disabled, "frobenius" = compute from Frobenius norm, float = constant
+ALPHA = 0.5  # 0.0 = disabled, "frobenius" = compute from Frobenius norm, float = constant
 
 
 # =============================================================================
@@ -93,13 +96,13 @@ class LayerResult:
     module_type: str
     display_name: str = ""  # Custom display name with input info
 
-    # Forward errors
-    fwd_abs_error: float = 0.0
+    # Relative errors only
     fwd_rel_error: float = 0.0
-
-    # Backward errors
-    bwd_abs_error: float = 0.0
     bwd_rel_error: float = 0.0
+
+    # Relative correction errors (corrections relative to original values)
+    fwd_correction_rel_error: float = 0.0  # Correction relative to original activation
+    bwd_correction_rel_error: float = 0.0  # Correction relative to original gradient
 
     # L2 norms of sensitivity components
     sens_pp_norm: float = 0.0
@@ -117,8 +120,6 @@ class LayerResult:
     # Alignment correction norms (from AlignmentCache)
     fwd_correction_norm: float = 0.0
     bwd_correction_norm: float = 0.0
-    fwd_relative_correction: float = 0.0
-    bwd_relative_correction: float = 0.0
 
     # Pass/fail
     fwd_pass: bool = True
@@ -132,15 +133,19 @@ class TestResult:
     success: bool = False
     error_message: str = ""
 
-    # Overall errors (max across layers)
-    fwd_abs_error: float = float('inf')
+    # Overall errors (max across layers) - relative only
     fwd_rel_error: float = float('inf')
-    bwd_abs_error: float = float('inf')
     bwd_rel_error: float = float('inf')
+    
+    # Overall correction errors (max across layers)
+    fwd_correction_rel_error: float = float('inf')  # Max forward correction relative to original
+    bwd_correction_rel_error: float = float('inf')  # Max backward correction relative to original
 
     # Pass/fail for each phase
     fwd_pass: bool = False
     bwd_pass: bool = False
+    fwd_correction_pass: bool = False
+    bwd_correction_pass: bool = False
 
     # Layer-wise results
     layer_results: List[LayerResult] = field(default_factory=list)
@@ -148,11 +153,11 @@ class TestResult:
     # API used for this test
     api_used: str = "functional"
 
-    # Tolerances used
-    fwd_abs_tol: float = DEFAULT_FWD_ABS_TOL
+    # Tolerances used (relative only)
     fwd_rel_tol: float = DEFAULT_FWD_REL_TOL
-    bwd_abs_tol: float = DEFAULT_BWD_ABS_TOL
     bwd_rel_tol: float = DEFAULT_BWD_REL_TOL
+    fwd_correction_rel_tol: float = DEFAULT_FWD_CORRECTION_REL_TOL
+    bwd_correction_rel_tol: float = DEFAULT_BWD_CORRECTION_REL_TOL
 
 
 # =============================================================================
@@ -170,7 +175,8 @@ class LayerCache:
         self.dc_grad_inputs_raw: Dict[str, Tensor] = {}  # Raw [4*batch] gradients for sum check
         self.dc_activations_raw: Dict[str, Tensor] = {}  # Raw [4*batch] activations for norm computation
         self.layer_types: Dict[str, str] = {}
-        self.layer_order: List[str] = []
+        self.layer_order: List[str] = []  # Will be populated in execution order
+        self.execution_order: List[str] = []  # Track actual execution order during forward pass
         self._handles: List = []
 
     def clear(self):
@@ -182,6 +188,7 @@ class LayerCache:
         self.dc_activations_raw.clear()
         self.layer_types.clear()
         self.layer_order.clear()
+        self.execution_order.clear()
         self._remove_hooks()
 
     def _remove_hooks(self):
@@ -190,17 +197,19 @@ class LayerCache:
         self._handles.clear()
 
     def register_orig_hooks(self, model: nn.Module):
-        """Register hooks to capture original activations/gradients."""
+        """Register hooks to capture original activations/gradients and track execution order."""
         self._remove_hooks()
+        self.execution_order.clear()
 
         for name, module in model.named_modules():
             if self._is_trackable(module) and name:
                 self.layer_types[name] = module.__class__.__name__
-                if name not in self.layer_order:
-                    self.layer_order.append(name)
 
                 def make_fwd_hook(n):
                     def hook(m, inp, out):
+                        # Track execution order during forward pass
+                        if n not in self.execution_order:
+                            self.execution_order.append(n)
                         self.orig_outputs[n] = out.detach().clone()
                     return hook
 
@@ -213,6 +222,8 @@ class LayerCache:
                 self._handles.append(module.register_forward_hook(make_fwd_hook(name)))
                 self._handles.append(module.register_full_backward_hook(make_bwd_hook(name)))
 
+        # After all hooks are registered, layer_order will be populated during forward pass
+
     def register_dc_hooks(self, model: nn.Module):
         """Register hooks to capture DC activations/gradients."""
         self._remove_hooks()
@@ -220,8 +231,6 @@ class LayerCache:
         for name, module in model.named_modules():
             if self._is_trackable(module) and name:
                 self.layer_types[name] = module.__class__.__name__
-                if name not in self.layer_order:
-                    self.layer_order.append(name)
 
                 def make_fwd_hook(n):
                     def hook(m, inp, out):
@@ -279,8 +288,15 @@ class LayerCache:
             nn.Flatten, nn.Dropout,
         ) + custom_modules)
 
-    def compute_errors(self, fwd_abs_tol: float, fwd_rel_tol: float,
-                       bwd_abs_tol: float, bwd_rel_tol: float,
+    def finalize_execution_order(self):
+        """Update layer_order to match execution_order after forward pass is complete."""
+        if self.execution_order:
+            # Update layer_order to reflect actual execution order
+            self.layer_order = self.execution_order.copy()
+
+    def compute_errors(self, fwd_rel_tol: float, bwd_rel_tol: float,
+                       fwd_correction_rel_tol: float, bwd_correction_rel_tol: float,
+                       alignment_cache = None,
                        output_orig: Optional[Tensor] = None,
                        output_dc: Optional[Tensor] = None,
                        sens_grad: Optional[Tensor] = None,
@@ -289,31 +305,58 @@ class LayerCache:
         """Compute layer-wise errors."""
         results = []
 
-        # Model layers
-        for name in self.layer_order:
+        # Input layer (sensitivities -> reconstructed gradient) - FIRST in execution order
+        if sens_grad is not None and orig_grad is not None:
+            lr = LayerResult(name=">>> INPUT", module_type="sensitivities")
+            lr.fwd_rel_error = 0.0
+            lr.fwd_pass = True
+            diff = (sens_grad - orig_grad).abs()
+            orig_norm = orig_grad.abs().max().item()
+            lr.bwd_rel_error = diff.max().item() / (orig_norm + 1e-10)
+            lr.bwd_pass = check_pass_relative_only(lr.bwd_rel_error, bwd_rel_tol)
+            
+            # Compute original gradient norm for input
+            lr.orig_grad_norm = orig_grad.norm().item()
+            
+            # Compute L2 norms of sensitivity components for input
+            if input_grad_raw is not None and input_grad_raw.shape[0] % 4 == 0:
+                q = input_grad_raw.shape[0] // 4
+                pp, np, pn, nn = input_grad_raw[:q], input_grad_raw[q:2*q], input_grad_raw[2*q:3*q], input_grad_raw[3*q:]
+                lr.sens_pp_norm = pp.norm().item()
+                lr.sens_np_norm = np.norm().item()
+                lr.sens_pn_norm = pn.norm().item()
+                lr.sens_nn_norm = nn.norm().item()
+            
+            results.append(lr)
+
+        # Use execution order captured during forward pass, fall back to layer_order if needed
+        execution_order = self.execution_order if self.execution_order else self.layer_order
+        
+        # Model layers - MIDDLE in execution order
+        for name in execution_order:
             layer_type = self.layer_types.get(name, "Unknown")
             lr = LayerResult(name=name, module_type=layer_type)
             lr.display_name = _get_add_display_name(name, layer_type)
 
-            # Forward error
+            # Forward error (relative only)
             if name in self.orig_outputs and name in self.dc_outputs:
                 orig = self.orig_outputs[name]
                 dc = self.dc_outputs[name]
                 if orig.shape == dc.shape:
                     diff = (orig - dc).abs()
-                    lr.fwd_abs_error = diff.max().item()
-                    lr.fwd_rel_error = lr.fwd_abs_error / (orig.abs().max().item() + 1e-10)
-                    lr.fwd_pass = lr.fwd_abs_error < fwd_abs_tol or lr.fwd_rel_error < fwd_rel_tol
+                    orig_norm = orig.abs().max().item()
+                    lr.fwd_rel_error = diff.max().item() / (orig_norm + 1e-10)
+                    lr.fwd_pass = check_pass_relative_only(lr.fwd_rel_error, fwd_rel_tol)
 
-            # Backward error
+            # Backward error (relative only)
             if name in self.orig_grad_inputs and name in self.dc_grad_inputs:
                 orig = self.orig_grad_inputs[name]
                 dc = self.dc_grad_inputs[name]
                 if orig.shape == dc.shape:
                     diff = (orig - dc).abs()
-                    lr.bwd_abs_error = diff.max().item()
-                    lr.bwd_rel_error = lr.bwd_abs_error / (orig.abs().max().item() + 1e-10)
-                    lr.bwd_pass = lr.bwd_abs_error < bwd_abs_tol or lr.bwd_rel_error < bwd_rel_tol
+                    orig_norm = orig.abs().max().item()
+                    lr.bwd_rel_error = diff.max().item() / (orig_norm + 1e-10)
+                    lr.bwd_pass = check_pass_relative_only(lr.bwd_rel_error, bwd_rel_tol)
                 
                 # Compute original gradient norm
                 lr.orig_grad_norm = orig.norm().item()
@@ -337,47 +380,22 @@ class LayerCache:
                     pos, neg = raw_act[:q], raw_act[q:2*q]
                     lr.act_pos_norm = pos.norm().item()
                     lr.act_neg_norm = neg.norm().item()
+            
+            # Correction errors will be populated later from AlignmentCache stats
 
             results.append(lr)
 
-        # Output layer (reconstruct_output)
+        # Output layer (reconstruct_output) - LAST in execution order
         if output_orig is not None and output_dc is not None:
             lr = LayerResult(name="<<< OUTPUT", module_type="reconstruct")
             diff = (output_orig - output_dc).abs()
-            lr.fwd_abs_error = diff.max().item()
-            lr.fwd_rel_error = lr.fwd_abs_error / (output_orig.abs().max().item() + 1e-10)
-            lr.fwd_pass = lr.fwd_abs_error < fwd_abs_tol or lr.fwd_rel_error < fwd_rel_tol
+            orig_norm = output_orig.abs().max().item()
+            lr.fwd_rel_error = diff.max().item() / (orig_norm + 1e-10)
+            lr.fwd_pass = check_pass_relative_only(lr.fwd_rel_error, fwd_rel_tol)
             # Backward at output is just the initialization, no error there
-            lr.bwd_abs_error = 0.0
             lr.bwd_rel_error = 0.0
             lr.bwd_pass = True
             results.append(lr)
-
-        # Input layer (sensitivities -> reconstructed gradient)
-        if sens_grad is not None and orig_grad is not None:
-            lr = LayerResult(name=">>> INPUT", module_type="sensitivities")
-            lr.fwd_abs_error = 0.0
-            lr.fwd_rel_error = 0.0
-            lr.fwd_pass = True
-            diff = (sens_grad - orig_grad).abs()
-            lr.bwd_abs_error = diff.max().item()
-            lr.bwd_rel_error = lr.bwd_abs_error / (orig_grad.abs().max().item() + 1e-10)
-            lr.bwd_pass = lr.bwd_abs_error < bwd_abs_tol or lr.bwd_rel_error < bwd_rel_tol
-            
-            # Compute original gradient norm for input
-            lr.orig_grad_norm = orig_grad.norm().item()
-            
-            # Compute L2 norms of sensitivity components for input
-            if input_grad_raw is not None and input_grad_raw.shape[0] % 4 == 0:
-                q = input_grad_raw.shape[0] // 4
-                pp, np, pn, nn = input_grad_raw[:q], input_grad_raw[q:2*q], input_grad_raw[2*q:3*q], input_grad_raw[3*q:]
-                lr.sens_pp_norm = pp.norm().item()
-                lr.sens_np_norm = np.norm().item()
-                lr.sens_pn_norm = pn.norm().item()
-                lr.sens_nn_norm = nn.norm().item()
-            
-            # Insert at beginning
-            results.insert(0, lr)
 
         return results
 
@@ -447,33 +465,71 @@ def init_random_biases(model: nn.Module) -> None:
                     module.bias.uniform_(-0.05, 0.05)
 
 
-def check_pass(abs_err: float, rel_err: float, abs_tol: float, rel_tol: float) -> bool:
-    """Pass if EITHER absolute error < abs_tol OR relative error < rel_tol.
-
-    This is the standard numerical tolerance check: we accept results that are either
-    absolutely close (for small values) or relatively close (for large values).
+def check_pass_relative_only(rel_err: float, rel_tol: float) -> bool:
+    """Pass if relative error < rel_tol.
+    
+    Only uses relative thresholds as requested.
     """
-    return abs_err < abs_tol or rel_err < rel_tol
+    return rel_err < rel_tol
+
+
+def check_layer_wise_pass(layer_results: List[LayerResult], 
+                         fwd_rel_tol: float,
+                         bwd_rel_tol: float,
+                         fwd_correction_rel_tol: float,
+                         bwd_correction_rel_tol: float) -> Tuple[bool, bool, bool, bool]:
+    """Check pass/fail for all layers and return overall pass status.
+    
+    Returns:
+        Tuple of (fwd_pass, bwd_pass, fwd_correction_pass, bwd_correction_pass)
+    """
+    fwd_pass = True
+    bwd_pass = True  
+    fwd_correction_pass = True
+    bwd_correction_pass = True
+    
+    for layer in layer_results:
+        # Check forward pass
+        layer.fwd_pass = check_pass_relative_only(layer.fwd_rel_error, fwd_rel_tol)
+        if not layer.fwd_pass:
+            fwd_pass = False
+            
+        # Check backward pass  
+        layer.bwd_pass = check_pass_relative_only(layer.bwd_rel_error, bwd_rel_tol)
+        if not layer.bwd_pass:
+            bwd_pass = False
+            
+        # Check forward correction
+        fwd_corr_pass = check_pass_relative_only(layer.fwd_correction_rel_error, fwd_correction_rel_tol)
+        if not fwd_corr_pass:
+            fwd_correction_pass = False
+            
+        # Check backward correction
+        bwd_corr_pass = check_pass_relative_only(layer.bwd_correction_rel_error, bwd_correction_rel_tol)
+        if not bwd_corr_pass:
+            bwd_correction_pass = False
+    
+    return fwd_pass, bwd_pass, fwd_correction_pass, bwd_correction_pass
 
 
 def test_model_functional(
     model: nn.Module,
     x: Tensor,
     name: str = "model",
-    fwd_abs_tol: float = DEFAULT_FWD_ABS_TOL,
     fwd_rel_tol: float = DEFAULT_FWD_REL_TOL,
-    bwd_abs_tol: float = DEFAULT_BWD_ABS_TOL,
     bwd_rel_tol: float = DEFAULT_BWD_REL_TOL,
+    fwd_correction_rel_tol: float = DEFAULT_FWD_CORRECTION_REL_TOL,
+    bwd_correction_rel_tol: float = DEFAULT_BWD_CORRECTION_REL_TOL,
 ) -> TestResult:
     """Test using the functional API (init_catted + reconstruct_output)."""
 
     result = TestResult(
         name=name,
         api_used="functional",
-        fwd_abs_tol=fwd_abs_tol,
         fwd_rel_tol=fwd_rel_tol,
-        bwd_abs_tol=bwd_abs_tol,
         bwd_rel_tol=bwd_rel_tol,
+        fwd_correction_rel_tol=fwd_correction_rel_tol,
+        bwd_correction_rel_tol=bwd_correction_rel_tol,
     )
 
     cache = LayerCache()
@@ -495,6 +551,12 @@ def test_model_functional(
             dummy_out = model(x)
             target_grad = torch.randn_like(dummy_out)
 
+        # Apply sensitivity alpha BEFORE cache capture to ensure consistency
+        if ALPHA == "frobenius":
+            set_sensitivity_alpha(model, mode='frobenius')
+        elif isinstance(ALPHA, (int, float)) and ALPHA > 0:
+            set_sensitivity_alpha(model, alpha=float(ALPHA), mode='constant')
+
         model = prepare_model_for_dc(
             model,
             align_forward=ALIGN_FORWARD,
@@ -502,12 +564,6 @@ def test_model_functional(
             x=x,
             target_grad=target_grad,
         )
-
-        # Apply sensitivity alpha if configured
-        if ALPHA == "frobenius":
-            set_sensitivity_alpha(model, mode='frobenius')
-        elif isinstance(ALPHA, (int, float)) and ALPHA > 0:
-            set_sensitivity_alpha(model, alpha=float(ALPHA), mode='constant')
 
         # Get alignment cache from model (if alignment is enabled)
         alignment_cache = None
@@ -519,6 +575,8 @@ def test_model_functional(
         # If alignment is enabled, use cached originals; otherwise capture them
         if alignment_cache is not None and (ALIGN_FORWARD or ALIGN_BACKWARD):
             # Use alignment cache's captured originals for comparison
+            # Note: get_layer_names() returns layers in execution order from alignment cache
+            cache.execution_order = list(alignment_cache.get_layer_names())
             for layer_name in alignment_cache.get_layer_names():
                 data = alignment_cache.get_layer_data(layer_name)
                 if data is not None:
@@ -563,11 +621,15 @@ def test_model_functional(
         cache._remove_hooks()
         unpatch_model(model)
 
+        # Finalize execution order based on captured forward pass
+        cache.finalize_execution_order()
+
         # =====================================================================
         # Compute layer-wise errors
         # =====================================================================
         result.layer_results = cache.compute_errors(
-            fwd_abs_tol, fwd_rel_tol, bwd_abs_tol, bwd_rel_tol,
+            fwd_rel_tol, bwd_rel_tol, fwd_correction_rel_tol, bwd_correction_rel_tol,
+            alignment_cache=alignment_cache,
             output_orig=orig_out.detach(), output_dc=dc_out.detach(),
             sens_grad=grad_dc, orig_grad=grad_orig,
             input_grad_raw=x_cat.grad
@@ -583,48 +645,28 @@ def test_model_functional(
                     stats = correction_stats[lr.name]
                     lr.fwd_correction_norm = stats.forward_correction_norm
                     lr.bwd_correction_norm = stats.backward_correction_norm
-                    lr.fwd_relative_correction = stats.forward_relative_correction
-                    lr.bwd_relative_correction = stats.backward_relative_correction
+                    # Use the relative correction values from alignment cache
+                    lr.fwd_correction_rel_error = stats.forward_relative_correction
+                    lr.bwd_correction_rel_error = stats.backward_relative_correction
 
         # =====================================================================
-        # Compute overall errors
+        # Layer-wise checking and overall pass/fail determination
         # =====================================================================
 
-        # Forward: compare final output
-        fwd_diff = (orig_out.detach() - dc_out.detach()).abs()
-        result.fwd_abs_error = fwd_diff.max().item()
-        result.fwd_rel_error = result.fwd_abs_error / (orig_out.abs().max().item() + 1e-10)
-
-        for lr in result.layer_results:
-            if lr.fwd_abs_error > result.fwd_abs_error:
-                result.fwd_abs_error = lr.fwd_abs_error
-            if lr.fwd_rel_error > result.fwd_rel_error:
-                result.fwd_rel_error = lr.fwd_rel_error
-
-        result.fwd_pass = check_pass(
-            result.fwd_abs_error, result.fwd_rel_error,
-            fwd_abs_tol, fwd_rel_tol
+        # Use layer-wise checking to determine overall pass/fail
+        result.fwd_pass, result.bwd_pass, result.fwd_correction_pass, result.bwd_correction_pass = check_layer_wise_pass(
+            result.layer_results, fwd_rel_tol, bwd_rel_tol, fwd_correction_rel_tol, bwd_correction_rel_tol
         )
+        
+        # Compute max errors across layers (for reporting)
+        result.fwd_rel_error = max((lr.fwd_rel_error for lr in result.layer_results), default=0.0)
+        result.bwd_rel_error = max((lr.bwd_rel_error for lr in result.layer_results), default=0.0)
+        result.fwd_correction_rel_error = max((lr.fwd_correction_rel_error for lr in result.layer_results), default=0.0)
+        result.bwd_correction_rel_error = max((lr.bwd_correction_rel_error for lr in result.layer_results), default=0.0)
 
-        # Backward: compare reconstructed gradient
-        bwd_diff = (grad_orig - grad_dc).abs()
-        result.bwd_abs_error = bwd_diff.max().item()
-        result.bwd_rel_error = result.bwd_abs_error / (grad_orig.abs().max().item() + 1e-10)
-
-        for lr in result.layer_results:
-            if lr.bwd_abs_error > result.bwd_abs_error:
-                result.bwd_abs_error = lr.bwd_abs_error
-            if lr.bwd_rel_error > result.bwd_rel_error:
-                result.bwd_rel_error = lr.bwd_rel_error
-
-        result.bwd_pass = check_pass(
-            result.bwd_abs_error, result.bwd_rel_error,
-            bwd_abs_tol, bwd_rel_tol
-        )
-
-        # Sum check: |delta_pp - delta_pn + delta_np - delta_nn| < tol
-
-        result.success = result.fwd_pass and result.bwd_pass
+        # Overall success requires all phases to pass
+        result.success = (result.fwd_pass and result.bwd_pass and 
+                         result.fwd_correction_pass and result.bwd_correction_pass)
 
     except Exception as e:
         import traceback
@@ -638,20 +680,20 @@ def test_model_context_manager(
     model: nn.Module,
     x: Tensor,
     name: str = "model",
-    fwd_abs_tol: float = DEFAULT_FWD_ABS_TOL,
     fwd_rel_tol: float = DEFAULT_FWD_REL_TOL,
-    bwd_abs_tol: float = DEFAULT_BWD_ABS_TOL,
     bwd_rel_tol: float = DEFAULT_BWD_REL_TOL,
+    fwd_correction_rel_tol: float = DEFAULT_FWD_CORRECTION_REL_TOL,
+    bwd_correction_rel_tol: float = DEFAULT_BWD_CORRECTION_REL_TOL,
 ) -> TestResult:
     """Test using the context manager API (dc_forward)."""
 
     result = TestResult(
         name=name,
         api_used="context_manager",
-        fwd_abs_tol=fwd_abs_tol,
         fwd_rel_tol=fwd_rel_tol,
-        bwd_abs_tol=bwd_abs_tol,
         bwd_rel_tol=bwd_rel_tol,
+        fwd_correction_rel_tol=fwd_correction_rel_tol,
+        bwd_correction_rel_tol=bwd_correction_rel_tol,
     )
 
     cache = LayerCache()
@@ -673,6 +715,12 @@ def test_model_context_manager(
             dummy_out = model(x)
             target_grad = torch.randn_like(dummy_out)
 
+        # Apply sensitivity alpha BEFORE cache capture to ensure consistency
+        if ALPHA == "frobenius":
+            set_sensitivity_alpha(model, mode='frobenius')
+        elif isinstance(ALPHA, (int, float)) and ALPHA > 0:
+            set_sensitivity_alpha(model, alpha=float(ALPHA), mode='constant')
+
         model = prepare_model_for_dc(
             model,
             align_forward=ALIGN_FORWARD,
@@ -680,12 +728,6 @@ def test_model_context_manager(
             x=x,
             target_grad=target_grad,
         )
-
-        # Apply sensitivity alpha if configured
-        if ALPHA == "frobenius":
-            set_sensitivity_alpha(model, mode='frobenius')
-        elif isinstance(ALPHA, (int, float)) and ALPHA > 0:
-            set_sensitivity_alpha(model, alpha=float(ALPHA), mode='constant')
 
         # Get alignment cache from model (if alignment is enabled)
         alignment_cache = None
@@ -739,11 +781,15 @@ def test_model_context_manager(
         cache._remove_hooks()
         unpatch_model(model)
 
+        # Finalize execution order based on captured forward pass
+        cache.finalize_execution_order()
+
         # =====================================================================
         # Compute layer-wise errors
         # =====================================================================
         result.layer_results = cache.compute_errors(
-            fwd_abs_tol, fwd_rel_tol, bwd_abs_tol, bwd_rel_tol,
+            fwd_rel_tol, bwd_rel_tol, fwd_correction_rel_tol, bwd_correction_rel_tol,
+            alignment_cache=None,  # Context manager doesn't use alignment cache in the same way
             output_orig=orig_out.detach(), output_dc=dc_out.detach(),
             sens_grad=grad_dc, orig_grad=grad_orig,
             input_grad_raw=input_grad_raw
@@ -759,48 +805,28 @@ def test_model_context_manager(
                     stats = correction_stats[lr.name]
                     lr.fwd_correction_norm = stats.forward_correction_norm
                     lr.bwd_correction_norm = stats.backward_correction_norm
-                    lr.fwd_relative_correction = stats.forward_relative_correction
-                    lr.bwd_relative_correction = stats.backward_relative_correction
+                    # Use the relative correction values from alignment cache
+                    lr.fwd_correction_rel_error = stats.forward_relative_correction
+                    lr.bwd_correction_rel_error = stats.backward_relative_correction
 
         # =====================================================================
-        # Compute overall errors
+        # Layer-wise checking and overall pass/fail determination
         # =====================================================================
 
-        # Forward: compare final output
-        fwd_diff = (orig_out.detach() - dc_out.detach()).abs()
-        result.fwd_abs_error = fwd_diff.max().item()
-        result.fwd_rel_error = result.fwd_abs_error / (orig_out.abs().max().item() + 1e-10)
-
-        for lr in result.layer_results:
-            if lr.fwd_abs_error > result.fwd_abs_error:
-                result.fwd_abs_error = lr.fwd_abs_error
-            if lr.fwd_rel_error > result.fwd_rel_error:
-                result.fwd_rel_error = lr.fwd_rel_error
-
-        result.fwd_pass = check_pass(
-            result.fwd_abs_error, result.fwd_rel_error,
-            fwd_abs_tol, fwd_rel_tol
+        # Use layer-wise checking to determine overall pass/fail
+        result.fwd_pass, result.bwd_pass, result.fwd_correction_pass, result.bwd_correction_pass = check_layer_wise_pass(
+            result.layer_results, fwd_rel_tol, bwd_rel_tol, fwd_correction_rel_tol, bwd_correction_rel_tol
         )
+        
+        # Compute max errors across layers (for reporting)
+        result.fwd_rel_error = max((lr.fwd_rel_error for lr in result.layer_results), default=0.0)
+        result.bwd_rel_error = max((lr.bwd_rel_error for lr in result.layer_results), default=0.0)
+        result.fwd_correction_rel_error = max((lr.fwd_correction_rel_error for lr in result.layer_results), default=0.0)
+        result.bwd_correction_rel_error = max((lr.bwd_correction_rel_error for lr in result.layer_results), default=0.0)
 
-        # Backward: compare reconstructed gradient
-        bwd_diff = (grad_orig - grad_dc).abs()
-        result.bwd_abs_error = bwd_diff.max().item()
-        result.bwd_rel_error = result.bwd_abs_error / (grad_orig.abs().max().item() + 1e-10)
-
-        for lr in result.layer_results:
-            if lr.bwd_abs_error > result.bwd_abs_error:
-                result.bwd_abs_error = lr.bwd_abs_error
-            if lr.bwd_rel_error > result.bwd_rel_error:
-                result.bwd_rel_error = lr.bwd_rel_error
-
-        result.bwd_pass = check_pass(
-            result.bwd_abs_error, result.bwd_rel_error,
-            bwd_abs_tol, bwd_rel_tol
-        )
-
-        # Sum check: |delta_pp - delta_pn + delta_np - delta_nn| < tol
-
-        result.success = result.fwd_pass and result.bwd_pass
+        # Overall success requires all phases to pass
+        result.success = (result.fwd_pass and result.bwd_pass and 
+                         result.fwd_correction_pass and result.bwd_correction_pass)
 
     except Exception as e:
         import traceback
@@ -822,10 +848,10 @@ def test_model_with_loss_functional(
     loss_fn: LossFn,
     name: str = "model",
     backward_only: bool = False,
-    fwd_abs_tol: float = DEFAULT_FWD_ABS_TOL,
     fwd_rel_tol: float = DEFAULT_FWD_REL_TOL,
-    bwd_abs_tol: float = DEFAULT_BWD_ABS_TOL,
     bwd_rel_tol: float = DEFAULT_BWD_REL_TOL,
+    fwd_correction_rel_tol: float = DEFAULT_FWD_CORRECTION_REL_TOL,
+    bwd_correction_rel_tol: float = DEFAULT_BWD_CORRECTION_REL_TOL,
 ) -> TestResult:
     """
     Test DC decomposition with a loss function applied to reconstructed output.
@@ -841,18 +867,16 @@ def test_model_with_loss_functional(
         target: Target tensor for loss computation
         loss_fn: Loss function (output, target) -> scalar loss
         backward_only: If True, use cached masks from original forward (no DC forward decomposition)
-        fwd_abs_tol, fwd_rel_tol: Forward pass tolerances
-        bwd_abs_tol, bwd_rel_tol: Backward pass tolerances
+        fwd_rel_tol, bwd_rel_tol: Forward/backward pass tolerances
+        fwd_correction_rel_tol, bwd_correction_rel_tol: Correction tolerances
     """
-    from dc_decompose.patcher import patch_model
-
     result = TestResult(
         name=name,
         api_used="functional",
-        fwd_abs_tol=fwd_abs_tol,
         fwd_rel_tol=fwd_rel_tol,
-        bwd_abs_tol=bwd_abs_tol,
         bwd_rel_tol=bwd_rel_tol,
+        fwd_correction_rel_tol=fwd_correction_rel_tol,
+        bwd_correction_rel_tol=bwd_correction_rel_tol,
     )
 
     try:
@@ -872,7 +896,20 @@ def test_model_with_loss_functional(
 
         # Phase 3: Prepare model for DC (no alignment - loss gradient is computed dynamically)
         # For loss-based testing, we don't use alignment since the gradient comes from the loss
-        patch_model(model)
+        from dc_decompose.patcher import prepare_model_for_dc
+        
+        # Generate target_grad for consistency
+        with torch.no_grad():
+            dummy_out = model(x)
+            target_grad = torch.randn_like(dummy_out)
+        
+        model = prepare_model_for_dc(
+            model,
+            align_forward=False,  # No alignment for loss-based tests
+            align_backward=False,
+            x=x,
+            target_grad=target_grad,
+        )
 
         # Apply sensitivity alpha if configured
         if ALPHA == "frobenius":
@@ -895,20 +932,25 @@ def test_model_with_loss_functional(
 
         unpatch_model(model)
 
-        # Compute errors
+        # Compute errors (relative only)
         fwd_err = torch.abs(dc_out.detach() - orig_out_detached)
-        result.fwd_abs_error = fwd_err.max().item()
         orig_norm = orig_out_detached.abs().max().item()
-        result.fwd_rel_error = result.fwd_abs_error / max(orig_norm, 1e-10)
+        result.fwd_rel_error = fwd_err.max().item() / max(orig_norm, 1e-10)
 
         bwd_err = torch.abs(grad_dc - grad_orig)
-        result.bwd_abs_error = bwd_err.max().item()
         grad_norm = grad_orig.abs().max().item()
-        result.bwd_rel_error = result.bwd_abs_error / max(grad_norm, 1e-10)
+        result.bwd_rel_error = bwd_err.max().item() / max(grad_norm, 1e-10)
 
-        result.fwd_pass = check_pass(result.fwd_abs_error, result.fwd_rel_error, fwd_abs_tol, fwd_rel_tol)
-        result.bwd_pass = check_pass(result.bwd_abs_error, result.bwd_rel_error, bwd_abs_tol, bwd_rel_tol)
-        result.success = result.fwd_pass and result.bwd_pass
+        # No correction errors for these simpler tests (set to 0)
+        result.fwd_correction_rel_error = 0.0
+        result.bwd_correction_rel_error = 0.0
+
+        result.fwd_pass = check_pass_relative_only(result.fwd_rel_error, fwd_rel_tol)
+        result.bwd_pass = check_pass_relative_only(result.bwd_rel_error, bwd_rel_tol)
+        result.fwd_correction_pass = True  # No corrections to check
+        result.bwd_correction_pass = True  # No corrections to check
+        result.success = (result.fwd_pass and result.bwd_pass and 
+                         result.fwd_correction_pass and result.bwd_correction_pass)
 
     except Exception as e:
         import traceback
@@ -925,32 +967,31 @@ def test_model_with_loss_context_manager(
     loss_fn: LossFn,
     name: str = "model",
     backward_only: bool = False,
-    fwd_abs_tol: float = DEFAULT_FWD_ABS_TOL,
     fwd_rel_tol: float = DEFAULT_FWD_REL_TOL,
-    bwd_abs_tol: float = DEFAULT_BWD_ABS_TOL,
     bwd_rel_tol: float = DEFAULT_BWD_REL_TOL,
+    fwd_correction_rel_tol: float = DEFAULT_FWD_CORRECTION_REL_TOL,
+    bwd_correction_rel_tol: float = DEFAULT_BWD_CORRECTION_REL_TOL,
 ) -> TestResult:
     """
     Test DC decomposition with a loss function using the context manager API.
 
     Same as test_model_with_loss_functional but uses dc_forward context manager.
     """
-    from dc_decompose.patcher import patch_model
-
     result = TestResult(
         name=name,
         api_used="context_manager",
-        fwd_abs_tol=fwd_abs_tol,
         fwd_rel_tol=fwd_rel_tol,
-        bwd_abs_tol=bwd_abs_tol,
         bwd_rel_tol=bwd_rel_tol,
+        fwd_correction_rel_tol=fwd_correction_rel_tol,
+        bwd_correction_rel_tol=bwd_correction_rel_tol,
     )
 
     try:
         model.eval()
         init_random_biases(model)
 
-        # Phase 1: Replace functional calls with modules
+        # Phase 1: Replace functional calls with modules  
+        from dc_decompose.functional_replacer import replace_functional_with_modules
         model = replace_functional_with_modules(model, inplace=True)
 
         # Phase 2: Compute original forward/backward with loss
@@ -962,7 +1003,13 @@ def test_model_with_loss_context_manager(
         orig_out_detached = orig_out.detach().clone()
 
         # Phase 3: Prepare model for DC (no alignment for loss-based testing)
+        from dc_decompose.patcher import patch_model, find_output_layer, mark_output_layer
+        
+        # Find and mark output layer before patching
+        output_layer = find_output_layer(model)
         patch_model(model)
+        if output_layer is not None:
+            mark_output_layer(output_layer, beta=1.0)
 
         # Apply sensitivity alpha if configured
         if ALPHA == "frobenius":
@@ -979,20 +1026,25 @@ def test_model_with_loss_context_manager(
         grad_dc = dc.reconstruct_gradient()
         unpatch_model(model)
 
-        # Compute errors
+        # Compute errors (relative only)
         fwd_err = torch.abs(dc_out.detach() - orig_out_detached)
-        result.fwd_abs_error = fwd_err.max().item()
         orig_norm = orig_out_detached.abs().max().item()
-        result.fwd_rel_error = result.fwd_abs_error / max(orig_norm, 1e-10)
+        result.fwd_rel_error = fwd_err.max().item() / max(orig_norm, 1e-10)
 
         bwd_err = torch.abs(grad_dc - grad_orig)
-        result.bwd_abs_error = bwd_err.max().item()
         grad_norm = grad_orig.abs().max().item()
-        result.bwd_rel_error = result.bwd_abs_error / max(grad_norm, 1e-10)
+        result.bwd_rel_error = bwd_err.max().item() / max(grad_norm, 1e-10)
 
-        result.fwd_pass = check_pass(result.fwd_abs_error, result.fwd_rel_error, fwd_abs_tol, fwd_rel_tol)
-        result.bwd_pass = check_pass(result.bwd_abs_error, result.bwd_rel_error, bwd_abs_tol, bwd_rel_tol)
-        result.success = result.fwd_pass and result.bwd_pass
+        # No correction errors for these simpler tests (set to 0)
+        result.fwd_correction_rel_error = 0.0
+        result.bwd_correction_rel_error = 0.0
+
+        result.fwd_pass = check_pass_relative_only(result.fwd_rel_error, fwd_rel_tol)
+        result.bwd_pass = check_pass_relative_only(result.bwd_rel_error, bwd_rel_tol)
+        result.fwd_correction_pass = True  # No corrections to check
+        result.bwd_correction_pass = True  # No corrections to check
+        result.success = (result.fwd_pass and result.bwd_pass and 
+                         result.fwd_correction_pass and result.bwd_correction_pass)
 
     except Exception as e:
         import traceback
@@ -1009,10 +1061,10 @@ def test_model_with_loss(
     loss_fn: LossFn,
     name: str = "model",
     backward_only: bool = False,
-    fwd_abs_tol: float = DEFAULT_FWD_ABS_TOL,
     fwd_rel_tol: float = DEFAULT_FWD_REL_TOL,
-    bwd_abs_tol: float = DEFAULT_BWD_ABS_TOL,
     bwd_rel_tol: float = DEFAULT_BWD_REL_TOL,
+    fwd_correction_rel_tol: float = DEFAULT_FWD_CORRECTION_REL_TOL,
+    bwd_correction_rel_tol: float = DEFAULT_BWD_CORRECTION_REL_TOL,
     api: str = "both",
 ) -> Union[TestResult, Tuple[TestResult, TestResult]]:
     """
@@ -1034,21 +1086,21 @@ def test_model_with_loss(
     if api == "functional":
         return test_model_with_loss_functional(
             copy.deepcopy(model), x, target, loss_fn, name, backward_only,
-            fwd_abs_tol, fwd_rel_tol, bwd_abs_tol, bwd_rel_tol
+            fwd_rel_tol, bwd_rel_tol, fwd_correction_rel_tol, bwd_correction_rel_tol
         )
     elif api == "context_manager":
         return test_model_with_loss_context_manager(
             copy.deepcopy(model), x, target, loss_fn, name, backward_only,
-            fwd_abs_tol, fwd_rel_tol, bwd_abs_tol, bwd_rel_tol
+            fwd_rel_tol, bwd_rel_tol, fwd_correction_rel_tol, bwd_correction_rel_tol
         )
     else:  # both
         r1 = test_model_with_loss_functional(
             copy.deepcopy(model), x, target, loss_fn, f"{name} [functional]", backward_only,
-            fwd_abs_tol, fwd_rel_tol, bwd_abs_tol, bwd_rel_tol
+            fwd_rel_tol, bwd_rel_tol, fwd_correction_rel_tol, bwd_correction_rel_tol
         )
         r2 = test_model_with_loss_context_manager(
             copy.deepcopy(model), x, target, loss_fn, f"{name} [context_mgr]", backward_only,
-            fwd_abs_tol, fwd_rel_tol, bwd_abs_tol, bwd_rel_tol
+            fwd_rel_tol, bwd_rel_tol, fwd_correction_rel_tol, bwd_correction_rel_tol
         )
         return r1, r2
 
@@ -1057,10 +1109,10 @@ def run_loss_model_tests(
     models: Dict[str, LossModelSpec],
     title: str = "DC Decomposition Tests with Loss",
     backward_only: bool = False,
-    fwd_abs_tol: float = DEFAULT_FWD_ABS_TOL,
     fwd_rel_tol: float = DEFAULT_FWD_REL_TOL,
-    bwd_abs_tol: float = DEFAULT_BWD_ABS_TOL,
     bwd_rel_tol: float = DEFAULT_BWD_REL_TOL,
+    fwd_correction_rel_tol: float = DEFAULT_FWD_CORRECTION_REL_TOL,
+    bwd_correction_rel_tol: float = DEFAULT_BWD_CORRECTION_REL_TOL,
     seed: int = 42,
     verbose: bool = True,
     test_both_apis: bool = True,
@@ -1086,8 +1138,8 @@ def run_loss_model_tests(
         print(title)
         print("=" * 90)
         print(f"Mode: {mode_str}")
-        print(f"Tolerances: fwd_abs={fwd_abs_tol:.0e}, fwd_rel={fwd_rel_tol:.0e}, "
-              f"bwd_abs={bwd_abs_tol:.0e}, bwd_rel={bwd_rel_tol:.0e}")
+        print(f"Tolerances: fwd_rel={fwd_rel_tol:.0e}, bwd_rel={bwd_rel_tol:.0e}, "
+              f"fwd_corr_rel={fwd_correction_rel_tol:.0e}, bwd_corr_rel={bwd_correction_rel_tol:.0e}")
         if test_both_apis:
             print("Testing both APIs: functional and context_manager")
         print()
@@ -1111,22 +1163,22 @@ def run_loss_model_tests(
         if test_both_apis:
             r1, r2 = test_model_with_loss(
                 model, x, target, loss_fn, name, backward_only,
-                fwd_abs_tol, fwd_rel_tol, bwd_abs_tol, bwd_rel_tol,
+                fwd_rel_tol, bwd_rel_tol, fwd_correction_rel_tol, bwd_correction_rel_tol,
                 api="both"
             )
             results.extend([r1, r2])
             if verbose:
-                _print_result(r1, show_layers=False)
-                _print_result(r2, show_layers=False)
+                _print_result(r1, show_layers=True)
+                _print_result(r2, show_layers=True)
         else:
             result = test_model_with_loss(
                 model, x, target, loss_fn, name, backward_only,
-                fwd_abs_tol, fwd_rel_tol, bwd_abs_tol, bwd_rel_tol,
+                fwd_rel_tol, bwd_rel_tol, fwd_correction_rel_tol, bwd_correction_rel_tol,
                 api="functional"
             )
             results.append(result)
             if verbose:
-                _print_result(result, show_layers=False)
+                _print_result(result, show_layers=True)
 
     # Print summary
     if verbose:
@@ -1139,10 +1191,10 @@ def test_model(
     model: nn.Module,
     x: Tensor,
     name: str = "model",
-    fwd_abs_tol: float = DEFAULT_FWD_ABS_TOL,
     fwd_rel_tol: float = DEFAULT_FWD_REL_TOL,
-    bwd_abs_tol: float = DEFAULT_BWD_ABS_TOL,
     bwd_rel_tol: float = DEFAULT_BWD_REL_TOL,
+    fwd_correction_rel_tol: float = DEFAULT_FWD_CORRECTION_REL_TOL,
+    bwd_correction_rel_tol: float = DEFAULT_BWD_CORRECTION_REL_TOL,
     api: str = "both",
 ) -> Union[TestResult, Tuple[TestResult, TestResult]]:
     """
@@ -1152,12 +1204,12 @@ def test_model(
         api: "functional", "context_manager", or "both" (default)
     """
     if api == "functional":
-        return test_model_functional(model, x, name, fwd_abs_tol, fwd_rel_tol, bwd_abs_tol, bwd_rel_tol)
+        return test_model_functional(model, x, name, fwd_rel_tol, bwd_rel_tol, fwd_correction_rel_tol, bwd_correction_rel_tol)
     elif api == "context_manager":
-        return test_model_context_manager(model, x, name, fwd_abs_tol, fwd_rel_tol, bwd_abs_tol, bwd_rel_tol)
+        return test_model_context_manager(model, x, name, fwd_rel_tol, bwd_rel_tol, fwd_correction_rel_tol, bwd_correction_rel_tol)
     else:  # both
-        r1 = test_model_functional(model, x, f"{name} [functional]", fwd_abs_tol, fwd_rel_tol, bwd_abs_tol, bwd_rel_tol)
-        r2 = test_model_context_manager(model, x, f"{name} [context_mgr]", fwd_abs_tol, fwd_rel_tol, bwd_abs_tol, bwd_rel_tol)
+        r1 = test_model_functional(model, x, f"{name} [functional]", fwd_rel_tol, bwd_rel_tol, fwd_correction_rel_tol, bwd_correction_rel_tol)
+        r2 = test_model_context_manager(model, x, f"{name} [context_mgr]", fwd_rel_tol, bwd_rel_tol, fwd_correction_rel_tol, bwd_correction_rel_tol)
         return r1, r2
 
 
@@ -1169,10 +1221,10 @@ def test_model(
 def run_model_tests(
     models: Dict[str, Tuple[ModelSpec, InputSpec]],
     title: str = "DC Decomposition Tests",
-    fwd_abs_tol: float = DEFAULT_FWD_ABS_TOL,
     fwd_rel_tol: float = DEFAULT_FWD_REL_TOL,
-    bwd_abs_tol: float = DEFAULT_BWD_ABS_TOL,
     bwd_rel_tol: float = DEFAULT_BWD_REL_TOL,
+    fwd_correction_rel_tol: float = DEFAULT_FWD_CORRECTION_REL_TOL,
+    bwd_correction_rel_tol: float = DEFAULT_BWD_CORRECTION_REL_TOL,
     seed: int = 42,
     verbose: bool = True,
     show_layers: bool = True,
@@ -1193,8 +1245,8 @@ def run_model_tests(
         print("=" * 90)
         print(title)
         print("=" * 90)
-        print(f"Tolerances: fwd_abs={fwd_abs_tol:.0e}, fwd_rel={fwd_rel_tol:.0e}, "
-              f"bwd_abs={bwd_abs_tol:.0e}, bwd_rel={bwd_rel_tol:.0e}")
+        print(f"Tolerances: fwd_rel={fwd_rel_tol:.0e}, bwd_rel={bwd_rel_tol:.0e}, "
+              f"fwd_corr_rel={fwd_correction_rel_tol:.0e}, bwd_corr_rel={bwd_correction_rel_tol:.0e}")
         if test_both_apis:
             print("Testing both APIs: functional and context_manager")
         print()
@@ -1218,10 +1270,10 @@ def run_model_tests(
         if test_both_apis:
             r1, r2 = test_model(
                 model, x, name,
-                fwd_abs_tol=fwd_abs_tol,
                 fwd_rel_tol=fwd_rel_tol,
-                bwd_abs_tol=bwd_abs_tol,
                 bwd_rel_tol=bwd_rel_tol,
+                fwd_correction_rel_tol=fwd_correction_rel_tol,
+                bwd_correction_rel_tol=bwd_correction_rel_tol,
                 api="both",
             )
             results.extend([r1, r2])
@@ -1231,10 +1283,10 @@ def run_model_tests(
         else:
             result = test_model(
                 model, x, name,
-                fwd_abs_tol=fwd_abs_tol,
                 fwd_rel_tol=fwd_rel_tol,
-                bwd_abs_tol=bwd_abs_tol,
                 bwd_rel_tol=bwd_rel_tol,
+                fwd_correction_rel_tol=fwd_correction_rel_tol,
+                bwd_correction_rel_tol=bwd_correction_rel_tol,
                 api="functional",
             )
             results.append(result)
@@ -1262,17 +1314,21 @@ def _print_result(result: TestResult, show_layers: bool = True) -> None:
 
     fwd_status = "ok" if result.fwd_pass else "FAIL"
     bwd_status = "ok" if result.bwd_pass else "FAIL"
+    fwd_corr_status = "ok" if result.fwd_correction_pass else "FAIL"
+    bwd_corr_status = "ok" if result.bwd_correction_pass else "FAIL"
 
     print(f"{'='*100}")
     print(f"Model: {result.name} [{status}]")
     print(f"{'='*100}")
-    print(f"  Overall Forward:  abs={result.fwd_abs_error:.2e}, rel={result.fwd_rel_error:.2e} [{fwd_status}]")
-    print(f"  Overall Backward: abs={result.bwd_abs_error:.2e}, rel={result.bwd_rel_error:.2e} [{bwd_status}]")
+    print(f"  Overall Forward:       rel={result.fwd_rel_error:.2e} [{fwd_status}]")
+    print(f"  Overall Backward:      rel={result.bwd_rel_error:.2e} [{bwd_status}]")
+    print(f"  Forward Correction:    rel={result.fwd_correction_rel_error:.2e} [{fwd_corr_status}]")
+    print(f"  Backward Correction:   rel={result.bwd_correction_rel_error:.2e} [{bwd_corr_status}]")
 
     if show_layers and result.layer_results:
         print()
         # Build header dynamically based on configuration
-        header = f"  {'Layer':<35} {'Type':<15} {'Fwd Abs':<10} {'Fwd Rel':<10} {'Bwd Abs':<10} {'Bwd Rel':<10}"
+        header = f"  {'Layer':<35} {'Type':<15} {'Fwd Rel':<10} {'Bwd Rel':<10} {'FwdCorr':<10} {'BwdCorr':<10}"
         header_len = 90
         
         if SHOW_SENSITIVITY_NORMS:
@@ -1302,8 +1358,8 @@ def _print_result(result: TestResult, show_layers: bool = True) -> None:
             bwd_mark = "" if lr.bwd_pass else "*"
             # Build row dynamically based on configuration
             row = (f"  {layer_name:<35} {lr.module_type:<15} "
-                   f"{lr.fwd_abs_error:<10.2e}{fwd_mark} {lr.fwd_rel_error:<10.2e} "
-                   f"{lr.bwd_abs_error:<10.2e}{bwd_mark} {lr.bwd_rel_error:<10.2e}")
+                   f"{lr.fwd_rel_error:<10.2e}{fwd_mark} {lr.bwd_rel_error:<10.2e}{bwd_mark} "
+                   f"{lr.fwd_correction_rel_error:<10.2e} {lr.bwd_correction_rel_error:<10.2e}")
             
             if SHOW_SENSITIVITY_NORMS:
                 row += (f" {lr.sens_pp_norm:<10.2e} {lr.sens_np_norm:<10.2e} "
@@ -1329,7 +1385,7 @@ def _print_summary(results: List[TestResult]) -> None:
     print("SUMMARY")
     print("=" * 90)
 
-    print(f"{'Model':<40} {'Fwd Abs':<12} {'Fwd Rel':<12} {'Bwd Abs':<12} {'Bwd Rel':<12} {'Status'}")
+    print(f"{'Model':<40} {'Fwd Rel':<12} {'Bwd Rel':<12} {'FwdCorr':<12} {'BwdCorr':<12} {'Status'}")
     print("-" * 90)
 
     for r in results:
@@ -1338,8 +1394,8 @@ def _print_summary(results: List[TestResult]) -> None:
             print(f"{display_name:<40} {'ERROR':<12} {'':<12} {'':<12} {'':<12} FAIL")
         else:
             status = "PASS" if r.success else "FAIL"
-            print(f"{display_name:<40} {r.fwd_abs_error:<12.2e} {r.fwd_rel_error:<12.2e} "
-                  f"{r.bwd_abs_error:<12.2e} {r.bwd_rel_error:<12.2e} {status}")
+            print(f"{display_name:<40} {r.fwd_rel_error:<12.2e} {r.bwd_rel_error:<12.2e} "
+                  f"{r.fwd_correction_rel_error:<12.2e} {r.bwd_correction_rel_error:<12.2e} {status}")
 
     print("-" * 90)
 
@@ -1361,17 +1417,17 @@ def test_model_simple(model: nn.Module, x: Tensor, name: str = "model",
     """Simple test interface for backward compatibility."""
     result = test_model_functional(
         model, x, name,
-        fwd_abs_tol=fwd_tol, fwd_rel_tol=fwd_tol,
-        bwd_abs_tol=bwd_tol, bwd_rel_tol=bwd_tol,
+        fwd_rel_tol=fwd_tol, bwd_rel_tol=bwd_tol,
+        fwd_correction_rel_tol=1e-3, bwd_correction_rel_tol=1e-3,
     )
 
     return {
         'name': name,
         'success': result.success,
-        'forward_error': result.fwd_abs_error,
         'forward_rel': result.fwd_rel_error,
-        'backward_error': result.bwd_abs_error,
         'backward_rel': result.bwd_rel_error,
+        'forward_correction_rel': result.fwd_correction_rel_error,
+        'backward_correction_rel': result.bwd_correction_rel_error,
         'error': result.error_message if result.error_message else None,
         'layer_results': result.layer_results,
     }

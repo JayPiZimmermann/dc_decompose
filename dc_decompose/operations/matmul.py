@@ -62,21 +62,27 @@ class DCMatMulFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input_4: Tensor, operand_4: Tensor, transpose_b: bool,
                 is_output_layer: bool, cache, layer_name, alpha: float) -> Tensor:
-        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name, alpha)
-        A_pos, A_neg = fb.split_input(input_4)
-        B_pos, B_neg = fb.split_input(operand_4)
+        
+        def compute(ctx, A_pos, A_neg, operand_4, transpose_b):
+            from .base import split_input_4
+            B_pos, B_neg = split_input_4(operand_4)
 
-        if transpose_b:
-            B_pos = B_pos.transpose(-2, -1)
-            B_neg = B_neg.transpose(-2, -1)
+            if transpose_b:
+                B_pos = B_pos.transpose(-2, -1)
+                B_neg = B_neg.transpose(-2, -1)
 
-        out_pos = torch.matmul(A_pos, B_pos) + torch.matmul(A_neg, B_neg)
-        out_neg = torch.matmul(A_pos, B_neg) + torch.matmul(A_neg, B_pos)
+            out_pos = torch.matmul(A_pos, B_pos) + torch.matmul(A_neg, B_neg)
+            out_neg = torch.matmul(A_pos, B_neg) + torch.matmul(A_neg, B_pos)
 
-        ctx.save_for_backward(A_pos, A_neg, B_pos, B_neg)
-        ctx.transpose_b = transpose_b
+            ctx.save_for_backward(A_pos, A_neg, B_pos, B_neg)
+            ctx.transpose_b = transpose_b
 
-        return fb.build_output(out_pos, out_neg)
+            return out_pos, out_neg
+
+        return ForwardBuilder.run(
+            ctx, input_4, compute, is_output_layer, cache, layer_name, alpha,
+            extra_args=(operand_4, transpose_b)
+        )
 
     @staticmethod
     def backward(ctx, grad_4: Tensor):

@@ -36,16 +36,20 @@ class DCGatherFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input_4: Tensor, index: Tensor, dim: int,
                 is_output_layer: bool, cache, layer_name, alpha: float) -> Tensor:
-        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name, alpha)
-        pos, neg = fb.split_input(input_4)
+        
+        def compute(ctx, pos, neg, input_4, index, dim):
+            out_pos = torch.gather(pos, dim, index)
+            out_neg = torch.gather(neg, dim, index)
 
-        out_pos = torch.gather(pos, dim, index)
-        out_neg = torch.gather(neg, dim, index)
+            ctx.save_for_backward(input_4, index)
+            ctx.dim = dim
 
-        ctx.save_for_backward(input_4, index)
-        ctx.dim = dim
+            return out_pos, out_neg
 
-        return fb.build_output(out_pos, out_neg)
+        return ForwardBuilder.run(
+            ctx, input_4, compute, is_output_layer, cache, layer_name, alpha,
+            extra_args=(input_4, index, dim)
+        )
 
     @staticmethod
     def backward(ctx, grad_4: Tensor):

@@ -23,29 +23,35 @@ class DCLayerNormFunction(torch.autograd.Function):
     def forward(ctx, input_4: Tensor, normalized_shape: List[int],
                 weight: Tensor, bias: Tensor, eps: float,
                 is_output_layer: bool, cache, layer_name, alpha: float) -> Tensor:
-        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name, alpha)
-        pos, neg = fb.split_input(input_4)
-        z = pos - neg
+        
+        def compute(ctx, pos, neg, normalized_shape, weight, bias, eps):
+            z = pos - neg
 
-        dims = list(range(-len(normalized_shape), 0))
-        mean = z.mean(dim=dims, keepdim=True)
-        var = z.var(dim=dims, unbiased=False, keepdim=True)
+            dims = list(range(-len(normalized_shape), 0))
+            mean = z.mean(dim=dims, keepdim=True)
+            var = z.var(dim=dims, unbiased=False, keepdim=True)
 
-        z_norm = (z - mean) / torch.sqrt(var + eps)
+            z_norm = (z - mean) / torch.sqrt(var + eps)
 
-        if weight is not None:
-            z_norm = z_norm * weight
-        if bias is not None:
-            z_norm = z_norm + bias
+            if weight is not None:
+                z_norm = z_norm * weight
+            if bias is not None:
+                z_norm = z_norm + bias
 
-        out_pos = F.relu(z_norm)
-        out_neg = F.relu(-z_norm)
+            out_pos = F.relu(z_norm)
+            out_neg = F.relu(-z_norm)
 
-        ctx.save_for_backward(z, mean, var, weight)
-        ctx.normalized_shape = normalized_shape
-        ctx.eps = eps
+            ctx.save_for_backward(z, mean, var, weight)
+            ctx.normalized_shape = normalized_shape
+            ctx.eps = eps
 
-        return make_output_4(out_pos, out_neg)
+            return out_pos, out_neg
+
+        return ForwardBuilder.run(
+            ctx, input_4, compute, is_output_layer, cache, layer_name, alpha,
+            recenter=False,
+            extra_args=(normalized_shape, weight, bias, eps)
+        )
 
     @staticmethod
     def backward(ctx, grad_4: Tensor):

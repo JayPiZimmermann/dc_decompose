@@ -12,8 +12,8 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
-from .base import recenter_dc
-from .patch_builder import create_patch_function, create_unpatch_function
+from .base import recenter_dc, DC_IS_OUTPUT_LAYER
+from .patch_builder import create_patch_function, create_unpatch_function, ForwardBuilder, BackwardBuilder, get_cache_info
 
 
 class Add(nn.Module):
@@ -37,16 +37,47 @@ class Add(nn.Module):
         return x + y
 
 
-def dc_forward_add(module: Add, x: Tensor, y: Tensor) -> Tensor:
-    """DC-aware forward for Add module.
+class DCAddFunction(torch.autograd.Function):
+    """Proper DC-aware addition function using ForwardBuilder pattern."""
+    
+    @staticmethod
+    def forward(ctx, x: Tensor, y: Tensor, recenter: bool,
+                is_output_layer: bool, cache, layer_name, alpha: float) -> Tensor:
+        
+        def compute(ctx, x_pos, x_neg, y, recenter):
+            from .base import split_input_4
+            # Split second input
+            y_pos, y_neg = split_input_4(y)
+            
+            # Add corresponding components
+            result_pos = x_pos + y_pos
+            result_neg = x_neg + y_neg
+            
+            return result_pos, result_neg
 
-    Simply adds the two tensors and optionally re-centers.
-    The recenter_dc function handles gradient flow correctly.
-    """
-    result = x + y
-    if module.recenter:
-        result = recenter_dc(result)
-    return result
+        return ForwardBuilder.run(
+            ctx, x, compute, is_output_layer, cache, layer_name, alpha,
+            use_recenter_dc=recenter, recenter=recenter,
+            extra_args=(y, recenter)
+        )
+    
+    @staticmethod
+    def backward(ctx, grad_4: Tensor) -> tuple:
+        def compute(ctx, delta_pp, delta_np, delta_pn, delta_nn):
+            # Addition distributes gradients to both inputs identically
+            return (delta_pp, delta_np, delta_pn, delta_nn), (delta_pp, delta_np, delta_pn, delta_nn)
+        
+        return BackwardBuilder.run_multi(ctx, grad_4, compute, num_outputs=2, num_extra_returns=5)
+
+
+def dc_forward_add(module: Add, x: Tensor, y: Tensor) -> Tensor:
+    """DC-aware forward for Add module using proper ForwardBuilder pattern."""
+    cache, layer_name, alpha = get_cache_info(module)
+    return DCAddFunction.apply(
+        x, y, module.recenter,
+        getattr(module, DC_IS_OUTPUT_LAYER, False),
+        cache, layer_name, alpha
+    )
 
 
 patch_add = create_patch_function(dc_forward_add)

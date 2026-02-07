@@ -136,7 +136,7 @@ def patch_model(
         elif isinstance(module, nn.Dropout):
             patch_dropout(module)
         elif isinstance(module, Add):
-            patch_add(module)  # Re-enabled: DC-format addition needs special handling
+            patch_add(module)
         # elif isinstance(module, Reshape):
         #     patch_reshape(module)  # Disabled: reshaping operation works out of the box
         # elif isinstance(module, View):
@@ -202,7 +202,7 @@ def unpatch_model(model: nn.Module) -> None:
         elif isinstance(module, nn.Dropout):
             unpatch_dropout(module)
         elif isinstance(module, Add):
-            unpatch_add(module)  # Re-enabled: DC-format addition needs special handling
+            unpatch_add(module)
         # elif isinstance(module, Reshape):
         #     unpatch_reshape(module)  # Disabled: reshaping operation works out of the box
         # elif isinstance(module, View):
@@ -352,19 +352,19 @@ def find_output_layer(model: nn.Module) -> Optional[nn.Module]:
         output_layer_types.append(Mean)
     output_layer_types = tuple(output_layer_types)
 
-    # Track execution order using hooks
+    # Track execution order using hooks - hook ALL modules to get correct ordering
     execution_order = []
     hooks = []
 
     def make_hook(module):
         def hook(mod, inp, out):
-            if isinstance(mod, output_layer_types):
-                execution_order.append(mod)
+            # Track all modules, we'll filter later
+            execution_order.append(mod)
         return hook
 
-    # Register hooks on all output_layer_types modules
+    # Register hooks on ALL modules to capture complete execution order
     for name, module in model.named_modules():
-        if isinstance(module, output_layer_types):
+        if name:  # Skip root module
             hooks.append(module.register_forward_hook(make_hook(module)))
 
     # Try to run a forward pass to determine execution order
@@ -393,9 +393,12 @@ def find_output_layer(model: nn.Module) -> Optional[nn.Module]:
         for h in hooks:
             h.remove()
 
-    # Return the last executed layer
+    # Find the last executed layer that is an output layer type
     if execution_order:
-        return execution_order[-1]
+        # Search backward through execution order for the last output layer type
+        for module in reversed(execution_order):
+            if isinstance(module, output_layer_types):
+                return module
 
     # Fallback: use registration order
     last_layer = None

@@ -23,26 +23,30 @@ class DCConv1dFunction(torch.autograd.Function):
     def forward(ctx, input_4: Tensor, weight: Tensor, bias: Optional[Tensor],
                 stride, padding, dilation, groups,
                 is_output_layer: bool, cache, layer_name, alpha: float) -> Tensor:
-        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name, alpha)
-        pos, neg = fb.split_input(input_4)
+        
+        def compute(ctx, pos, neg, weight, bias, stride, padding, dilation, groups):
+            weight_pos = F.relu(weight)
+            weight_neg = F.relu(-weight)
 
-        weight_pos = F.relu(weight)
-        weight_neg = F.relu(-weight)
+            out_pos = F.conv1d(pos, weight_pos, None, stride, padding, dilation, groups)
+            out_pos = out_pos + F.conv1d(neg, weight_neg, None, stride, padding, dilation, groups)
+            out_neg = F.conv1d(pos, weight_neg, None, stride, padding, dilation, groups)
+            out_neg = out_neg + F.conv1d(neg, weight_pos, None, stride, padding, dilation, groups)
 
-        out_pos = F.conv1d(pos, weight_pos, None, stride, padding, dilation, groups)
-        out_pos = out_pos + F.conv1d(neg, weight_neg, None, stride, padding, dilation, groups)
-        out_neg = F.conv1d(pos, weight_neg, None, stride, padding, dilation, groups)
-        out_neg = out_neg + F.conv1d(neg, weight_pos, None, stride, padding, dilation, groups)
+            if bias is not None:
+                out_pos = out_pos + F.relu(bias).view(1, -1, 1)
+                out_neg = out_neg + F.relu(-bias).view(1, -1, 1)
 
-        if bias is not None:
-            out_pos = out_pos + F.relu(bias).view(1, -1, 1)
-            out_neg = out_neg + F.relu(-bias).view(1, -1, 1)
+            ctx.save_for_backward(weight)
+            ctx.stride, ctx.padding, ctx.dilation, ctx.groups = stride, padding, dilation, groups
+            ctx.input_shape = pos.shape
 
-        ctx.save_for_backward(weight)
-        ctx.stride, ctx.padding, ctx.dilation, ctx.groups = stride, padding, dilation, groups
-        ctx.input_shape = pos.shape
+            return out_pos, out_neg
 
-        return fb.build_output(out_pos, out_neg)
+        return ForwardBuilder.run(
+            ctx, input_4, compute, is_output_layer, cache, layer_name, alpha,
+            extra_args=(weight, bias, stride, padding, dilation, groups)
+        )
 
     @staticmethod
     def backward(ctx, grad_4: Tensor):
@@ -96,26 +100,30 @@ class DCConv2dFunction(torch.autograd.Function):
     def forward(ctx, input_4: Tensor, weight: Tensor, bias: Optional[Tensor],
                 stride, padding, dilation, groups,
                 is_output_layer: bool, cache, layer_name, alpha: float) -> Tensor:
-        fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name, alpha)
-        pos, neg = fb.split_input(input_4)
+        
+        def compute(ctx, pos, neg, weight, bias, stride, padding, dilation, groups):
+            weight_pos = F.relu(weight)
+            weight_neg = F.relu(-weight)
 
-        weight_pos = F.relu(weight)
-        weight_neg = F.relu(-weight)
+            out_pos = F.conv2d(pos, weight_pos, None, stride, padding, dilation, groups)
+            out_pos = out_pos + F.conv2d(neg, weight_neg, None, stride, padding, dilation, groups)
+            out_neg = F.conv2d(pos, weight_neg, None, stride, padding, dilation, groups)
+            out_neg = out_neg + F.conv2d(neg, weight_pos, None, stride, padding, dilation, groups)
 
-        out_pos = F.conv2d(pos, weight_pos, None, stride, padding, dilation, groups)
-        out_pos = out_pos + F.conv2d(neg, weight_neg, None, stride, padding, dilation, groups)
-        out_neg = F.conv2d(pos, weight_neg, None, stride, padding, dilation, groups)
-        out_neg = out_neg + F.conv2d(neg, weight_pos, None, stride, padding, dilation, groups)
+            if bias is not None:
+                out_pos = out_pos + F.relu(bias).view(1, -1, 1, 1)
+                out_neg = out_neg + F.relu(-bias).view(1, -1, 1, 1)
 
-        if bias is not None:
-            out_pos = out_pos + F.relu(bias).view(1, -1, 1, 1)
-            out_neg = out_neg + F.relu(-bias).view(1, -1, 1, 1)
+            ctx.save_for_backward(weight)
+            ctx.stride, ctx.padding, ctx.dilation, ctx.groups = stride, padding, dilation, groups
+            ctx.input_shape = pos.shape
 
-        ctx.save_for_backward(weight)
-        ctx.stride, ctx.padding, ctx.dilation, ctx.groups = stride, padding, dilation, groups
-        ctx.input_shape = pos.shape
+            return out_pos, out_neg
 
-        return fb.build_output(out_pos, out_neg)
+        return ForwardBuilder.run(
+            ctx, input_4, compute, is_output_layer, cache, layer_name, alpha,
+            extra_args=(weight, bias, stride, padding, dilation, groups)
+        )
 
     @staticmethod
     def backward(ctx, grad_4: Tensor):

@@ -66,14 +66,24 @@ class ForwardBuilder:
     Builder for DC forward pass with consistent handling of splitting,
     output creation, re-centering, and alignment.
 
+    NEW DESIGN: The builder wraps functions, not called by functions.
+
     Usage:
+        @staticmethod
+        def forward(ctx, input_4, ..., is_output_layer, cache, layer_name):
+            def compute(ctx, pos, neg):
+                # ... layer-specific computation ...
+                return out_pos, out_neg
+            
+            return ForwardBuilder.run(ctx, input_4, compute, is_output_layer, cache, layer_name, alpha, 
+                                      recenter=True, extra_args=(...,))
+
+    Legacy Usage (still supported for compatibility):
         @staticmethod
         def forward(ctx, input_4, ..., is_output_layer, cache, layer_name):
             fb = ForwardBuilder(ctx, is_output_layer, cache, layer_name, alpha)
             pos, neg = fb.split_input(input_4)
-
             # ... layer-specific computation ...
-
             return fb.build_output(out_pos, out_neg)
     """
 
@@ -97,6 +107,70 @@ class ForwardBuilder:
         ctx._dc_layer_name = layer_name
         ctx._dc_sensitivity_alpha = alpha
 
+    @staticmethod
+    def run(
+        ctx: Any,
+        input_4: Tensor,
+        forward_fn: Callable[[Any, Tensor, Tensor, Any], Tuple[Tensor, Tensor]],
+        is_output_layer: bool,
+        cache: Optional['AlignmentCache'] = None,
+        layer_name: Optional[str] = None,
+        alpha: float = 0.0,
+        recenter: bool = True,
+        use_recenter_dc: bool = False,
+        extra_args: Tuple = (),
+        return_raw: bool = False,
+    ) -> Tensor:
+        """
+        Execute forward pass with layer-specific computation.
+
+        Args:
+            ctx: Autograd context
+            input_4: Input tensor [4*batch]
+            forward_fn: Function(ctx, pos, neg, *extra_args) -> (out_pos, out_neg)
+            is_output_layer: Whether this is an output layer
+            cache: Alignment cache
+            layer_name: Layer name for alignment
+            alpha: Sensitivity alpha
+            recenter: Whether to apply re-centering (default True)
+            use_recenter_dc: Use recenter_dc instead of recenter_forward
+            extra_args: Additional arguments to pass to forward_fn
+            return_raw: If True, return (out_pos, out_neg) tuple instead of combined tensor
+
+        Returns:
+            [4*batch] output tensor or (out_pos, out_neg) if return_raw=True
+        """
+        # Store in context for backward
+        ctx.is_output_layer = is_output_layer
+        ctx._dc_cache = cache
+        ctx._dc_layer_name = layer_name
+        ctx._dc_sensitivity_alpha = alpha
+
+        # Split input
+        pos, neg = split_input_4(input_4)
+
+        # Run layer-specific computation
+        out_pos, out_neg = forward_fn(ctx, pos, neg, *extra_args)
+
+        # Apply forward alignment if cache is active
+        if cache is not None and layer_name:
+            if AlignmentMode and cache.mode in (AlignmentMode.FORWARD_ONLY, AlignmentMode.BOTH):
+                out_pos, out_neg = cache.align_forward(layer_name, out_pos, out_neg)
+
+        if return_raw:
+            return out_pos, out_neg
+
+        output = make_output_4(out_pos, out_neg)
+
+        if recenter:
+            if use_recenter_dc:
+                output = recenter_dc(output)
+            else:
+                output = recenter_forward(output)
+
+        return output
+
+    # Legacy methods (for backward compatibility during transition)
     def split_input(self, input_4: Tensor) -> Tuple[Tensor, Tensor]:
         """Split [4*batch] input into pos and neg."""
         return split_input_4(input_4)
@@ -109,14 +183,6 @@ class ForwardBuilder:
     ) -> Tensor:
         """
         Create [4*batch] output with re-centering and alignment.
-
-        Args:
-            out_pos: Positive output
-            out_neg: Negative output
-            recenter: Whether to apply re-centering (default True)
-
-        Returns:
-            [4*batch] output tensor
         """
         # Apply forward alignment if cache is active
         if self.cache is not None and self.layer_name:
@@ -139,8 +205,6 @@ class ForwardBuilder:
     ) -> Tensor:
         """
         Create [4*batch] output with recenter_dc (for ReLU-like ops).
-
-        Uses recenter_dc instead of recenter_forward.
         """
         # Apply forward alignment if cache is active
         if self.cache is not None and self.layer_name:
@@ -216,18 +280,18 @@ class BackwardBuilder:
         # Run layer-specific backward computation
         new_pp, new_np, new_pn, new_nn = backward_fn(ctx, delta_pp, delta_np, delta_pn, delta_nn)
 
-        # Apply backward alignment if cache is active
+        # Apply sensitivity shift for numerical stability
+        if alpha > 0.0 and not is_output_layer:
+            new_pp, new_np, new_pn, new_nn = shift_sensitivities(
+                new_pp, new_np, new_pn, new_nn, alpha
+            )
+
+        # Apply backward alignment if cache is active (after alpha shifting)
         if cache is not None and layer_name:
             if AlignmentMode and cache.mode in (AlignmentMode.BACKWARD_ONLY, AlignmentMode.BOTH):
                 new_pp, new_np, new_pn, new_nn = cache.align_backward(
                     layer_name, new_pp, new_np, new_pn, new_nn
                 )
-
-        # Apply sensitivity shift for numerical stability
-        if alpha > 0.0:
-            new_pp, new_np, new_pn, new_nn = shift_sensitivities(
-                new_pp, new_np, new_pn, new_nn, alpha
-            )
 
         # Build gradient tensor
         grad = make_grad_4(new_pp, new_np, new_pn, new_nn)
@@ -272,18 +336,18 @@ class BackwardBuilder:
         for i in range(num_outputs):
             new_pp, new_np, new_pn, new_nn = results[i]
 
-            # Apply backward alignment if cache is active
+            # Apply sensitivity shift for numerical stability
+            if alpha > 0.0 and not is_output_layer:
+                new_pp, new_np, new_pn, new_nn = shift_sensitivities(
+                    new_pp, new_np, new_pn, new_nn, alpha
+                )
+
+            # Apply backward alignment if cache is active (after alpha shifting)
             if cache is not None and layer_name:
                 if AlignmentMode and cache.mode in (AlignmentMode.BACKWARD_ONLY, AlignmentMode.BOTH):
                     new_pp, new_np, new_pn, new_nn = cache.align_backward(
                         layer_name, new_pp, new_np, new_pn, new_nn
                     )
-
-            # Apply sensitivity shift for numerical stability
-            if alpha > 0.0:
-                new_pp, new_np, new_pn, new_nn = shift_sensitivities(
-                    new_pp, new_np, new_pn, new_nn, alpha
-                )
 
             grads.append(make_grad_4(new_pp, new_np, new_pn, new_nn))
 
