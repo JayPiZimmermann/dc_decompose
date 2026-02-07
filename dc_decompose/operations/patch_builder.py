@@ -47,6 +47,11 @@ from .base import (
 if TYPE_CHECKING:
     from ..alignment_cache import AlignmentCache
 
+try:
+    from ..alignment_cache import AlignmentMode
+except ImportError:
+    AlignmentMode = None
+
 
 def get_cache_info(module: nn.Module) -> Tuple[Optional['AlignmentCache'], Optional[str], float]:
     """Extract alignment cache, layer name, and sensitivity alpha from a module."""
@@ -115,8 +120,7 @@ class ForwardBuilder:
         """
         # Apply forward alignment if cache is active
         if self.cache is not None and self.layer_name:
-            from ..alignment_cache import AlignmentMode
-            if self.cache.mode in (AlignmentMode.FORWARD_ONLY, AlignmentMode.BOTH):
+            if AlignmentMode and self.cache.mode in (AlignmentMode.FORWARD_ONLY, AlignmentMode.BOTH):
                 out_pos, out_neg = self.cache.align_forward(
                     self.layer_name, out_pos, out_neg
                 )
@@ -140,8 +144,7 @@ class ForwardBuilder:
         """
         # Apply forward alignment if cache is active
         if self.cache is not None and self.layer_name:
-            from ..alignment_cache import AlignmentMode
-            if self.cache.mode in (AlignmentMode.FORWARD_ONLY, AlignmentMode.BOTH):
+            if AlignmentMode and self.cache.mode in (AlignmentMode.FORWARD_ONLY, AlignmentMode.BOTH):
                 out_pos, out_neg = self.cache.align_forward(
                     self.layer_name, out_pos, out_neg
                 )
@@ -215,8 +218,7 @@ class BackwardBuilder:
 
         # Apply backward alignment if cache is active
         if cache is not None and layer_name:
-            from ..alignment_cache import AlignmentMode
-            if cache.mode in (AlignmentMode.BACKWARD_ONLY, AlignmentMode.BOTH):
+            if AlignmentMode and cache.mode in (AlignmentMode.BACKWARD_ONLY, AlignmentMode.BOTH):
                 new_pp, new_np, new_pn, new_nn = cache.align_backward(
                     layer_name, new_pp, new_np, new_pn, new_nn
                 )
@@ -272,8 +274,7 @@ class BackwardBuilder:
 
             # Apply backward alignment if cache is active
             if cache is not None and layer_name:
-                from ..alignment_cache import AlignmentMode
-                if cache.mode in (AlignmentMode.BACKWARD_ONLY, AlignmentMode.BOTH):
+                if AlignmentMode and cache.mode in (AlignmentMode.BACKWARD_ONLY, AlignmentMode.BOTH):
                     new_pp, new_np, new_pn, new_nn = cache.align_backward(
                         layer_name, new_pp, new_np, new_pn, new_nn
                     )
